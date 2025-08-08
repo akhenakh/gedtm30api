@@ -68,10 +68,7 @@ func (g *GeoTIFF) Profile(coordinates [][]float64) ([][]float64, error) {
 		dx := float64(x2 - x1)
 		dy := float64(y2 - y1)
 
-		steps := math.Abs(dx)
-		if math.Abs(dy) > steps {
-			steps = math.Abs(dy)
-		}
+		steps := math.Max(math.Abs(dx), math.Abs(dy))
 		numSteps := int(math.Ceil(steps))
 		if numSteps == 0 {
 			numSteps = 1
@@ -81,8 +78,8 @@ func (g *GeoTIFF) Profile(coordinates [][]float64) ([][]float64, error) {
 		yInc := dy / float64(numSteps)
 
 		for j := 0; j <= numSteps; j++ {
-			currX := x1 + int(math.Round(float64(j)*xInc))
-			currY := y1 + int(math.Round(float64(j)*yInc))
+			currX := x1 + int(float64(j)*xInc)
+			currY := y1 + int(float64(j)*yInc)
 
 			pixelKey := fmt.Sprintf("%d,%d", currX, currY)
 			if _, ok := visitedPixels[pixelKey]; ok {
