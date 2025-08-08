@@ -56,8 +56,7 @@ The server will start multiple services on different ports:
 To use a local GeoTIFF file, set the `COG_SOURCE` environment variable to the file path:
 
 ```sh
-export COG_SOURCE="/path/to/your/data.tiff"
-go run .
+COG_SOURCE="/path/to/your/data.tiff" gedtm30api
 ```
 
 ## API Reference
