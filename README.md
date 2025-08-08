@@ -2,7 +2,7 @@
 
 This project provides a high-performance elevation service from a Cloud-Optimized GeoTIFF (COG) file. It exposes the service via both a traditional HTTP REST API and a modern, high-performance gRPC API. The service is optimized for low-latency queries by using on-demand tile fetching, in-memory caching, and concurrent request handling.
 
-The primary data source is [Global Ensemble Digital Terrain Model 30m (GEDTM30)](https://zenodo.org/records/15689805). 
+The primary data source is [Global Ensemble Digital Terrain Model 30m (GEDTM30)](https://zenodo.org/records/15689805).
 
 ## Features
 
@@ -34,6 +34,14 @@ gdal_translate -of COG \
 go install github.com/akhenakh/gedtm30api@latest
 gedtm30api
 ```
+
+### Environment Variables
+- LOG_LEVEL envDefault:"INFO"
+- HTTP_PORT envDefault:"8080"
+- API_PORT envDefault:"9200"
+- HEALTH_PORT envDefault:"6666"
+- METRICS_PORT envDefault:"8888"
+- COG_SOURCE envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
 
 The server will start multiple services on different ports:
 -   **HTTP REST & Web UI**: `http://localhost:8080`
@@ -175,7 +183,5 @@ A simple web UI is available at `http://localhost:8080`. It allows you to intera
 
 ## GeoTIFF library
 
-The geoTIFF library has only been tested with this specific dataset and does not support all the GeoTIFF spec (for example only DEFLATE compression is supported).  
+The geoTIFF library has only been tested with this specific dataset and does not support all the GeoTIFF spec (for example only DEFLATE compression is supported).
 It is reusing some code from [geotiff](https://github.com/gden173/geotiff).
-
-
