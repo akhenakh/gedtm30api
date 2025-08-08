@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package elevationapi.v1;
+
+// The go_package option specifies the import path for the generated Go code.
+option go_package = "github.com/akhenakh/gedtm30api/gen/go/elevationapi/v1;elevationapi";
+
+// The service definition.
+service ElevationService {
+  // Retrieves the elevation for a single geographic coordinate.
+  rpc GetElevation(ElevationRequest) returns (ElevationResponse) {}
+
+  // Retrieves an elevation profile along a path of coordinates.
+  rpc GetProfile(ProfileRequest) returns (ProfileResponse) {}
+}
+
+message ElevationRequest {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+message ElevationResponse {
+  float elevation = 1; // float in protobuf maps to float32 in Go
+}
+
+// Represents a single point for the profile request.
+message Point {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+// Represents a single point in the profile response, including elevation.
+message ElevationPoint {
+  double latitude = 1;
+  double longitude = 2;
+  float elevation = 3;
+}
+
+message ProfileRequest { repeated Point points = 1; }
+
+message ProfileResponse { repeated ElevationPoint points = 1; }

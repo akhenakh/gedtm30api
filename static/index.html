@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>GeoTIFF Elevation Profile</title>
+
+        <!-- Leaflet CSS -->
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+            integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+            crossorigin=""
+        />
+
+        <!-- Custom CSS -->
+        <link rel="stylesheet" href="/style.css" />
+    </head>
+    <body>
+        <h1>Elevation Profile Tool</h1>
+        <div id="controls">
+            <p id="info">Click on the map to add points.</p>
+            <button id="resetButton">Reset</button>
+        </div>
+
+        <div id="map"></div>
+
+        <div class="chart-container">
+            <canvas id="profileChart"></canvas>
+        </div>
+
+        <!-- Leaflet JS -->
+        <script
+            src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""
+        ></script>
+        <!-- Chart.js -->
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+        <!-- Custom App JS -->
+        <script src="/app.js"></script>
+    </body>
+</html>
