@@ -183,6 +183,8 @@ Retrieves an elevation profile along a path.
 
 A simple web UI is available at `http://localhost:8080`. It allows you to interactively click on a map to get single-point elevations or generate and visualize elevation profiles.
 
+![Web Interface Screenshot](./img/elevation.png)
+
 ## GeoTIFF library
 
 The geoTIFF library has only been tested with this specific dataset and does not support all the GeoTIFF spec (for example only DEFLATE compression is supported).
