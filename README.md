@@ -1,6 +1,8 @@
 # GEDTM30API
 
-This project provides a high-performance elevation service from a Cloud-Optimized GeoTIFF (COG) file. It exposes the service via both a traditional HTTP REST API and a modern, high-performance gRPC API. The service is optimized for low-latency queries by using on-demand tile fetching, in-memory caching, and concurrent request handling.
+This project provides a high-performance elevation service from a Cloud-Optimized GeoTIFF (COG) file.
+It exposes the service via both a traditional HTTP REST API and a modern, high-performance gRPC API.
+The service is optimized for low-latency queries by using on-demand tile fetching, in-memory caching, and concurrent request handling.
 
 The primary data source is [Global Ensemble Digital Terrain Model 30m (GEDTM30)](https://zenodo.org/records/15689805).
 
