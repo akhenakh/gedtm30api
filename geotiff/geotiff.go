@@ -180,7 +180,7 @@ func (t Tag) String() string {
 
 // Open parses a GeoTIFF file from the provided io.ReadSeeker and returns a GeoTIFF struct
 // with all necessary metadata extracted for reading geographic raster data.
-func Open(r io.ReadSeeker) (*GeoTIFF, error) {
+func Open(r io.ReadSeeker, cacheSize int64, itemsToPrune uint32) (*GeoTIFF, error) {
 	// Read and parse all TIFF tags from the file header
 	gTags, header, err := readTags(r)
 	if err != nil {
@@ -195,7 +195,7 @@ func Open(r io.ReadSeeker) (*GeoTIFF, error) {
 		byteOrder: header.byteOrder,
 		isBigTIFF: header.isBigTIFF,
 		// Cache to hold processed slices.
-		tileCache: ccache.New(ccache.Configure[any]().MaxSize(1024).ItemsToPrune(100)),
+		tileCache: ccache.New(ccache.Configure[any]().MaxSize(cacheSize).ItemsToPrune(itemsToPrune)),
 	}
 
 	// Extract required image dimensions

@@ -26,7 +26,7 @@ func TestAtCoord(t *testing.T) {
 	defer f.Close()
 
 	// Initialize the GeoTIFF reader with our test file.
-	geo, err := Open(f)
+	geo, err := Open(f, 5, 1)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestBounds(t *testing.T) {
 	}
 	defer f.Close()
 
-	geo, err := Open(f)
+	geo, err := Open(f, 5, 1)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestProfile(t *testing.T) {
 	defer f.Close()
 
 	// Initialize the GeoTIFF reader with our test file.
-	geo, err := Open(f)
+	geo, err := Open(f, 5, 1)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}

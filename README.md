@@ -44,6 +44,8 @@ gedtm30api
 - HEALTH_PORT envDefault:"6666"
 - METRICS_PORT envDefault:"8888"
 - COG_SOURCE envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+- CACHE_MAX_SIZE envDefault:"512" number of tiles to keep in the cache
+- CACHE_ITEMS_TO_PRUNE envDefault:"32" number of tiles to prune from the cache
 
 The server will start multiple services on different ports:
 -   **HTTP REST & Web UI**: `http://localhost:8080`
@@ -183,6 +185,14 @@ Retrieves an elevation profile along a path.
 A simple web UI is available at `http://localhost:8080`. It allows you to interactively click on a map to get single-point elevations or generate and visualize elevation profiles.
 
 ![Web Interface Screenshot](./img/elevation.png)
+
+## Cache Management
+
+The server uses a cache to store recently accessed tiles. The cache size can be configured using the `CACHE_MAX_SIZE` environment variable. When the cache reaches its maximum size, the least recently used tiles are pruned to make room for new ones. The number of tiles to prune can be configured using the `CACHE_ITEMS_TO_PRUNE` environment variable.
+
+With 512 × 512 tiles, since a pixel is using 4 bytes (for a float32 or int32), 262,144 pixels × 4 bytes/pixel = 1,048,576 bytes.
+
+So 128 tiles would account for 128 MiB in memory.
 
 ## GeoTIFF library
 

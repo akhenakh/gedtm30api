@@ -53,12 +53,14 @@ var (
 
 // Config holds all configuration for the application, loaded from environment variables.
 type Config struct {
-	LogLevel        string `env:"LOG_LEVEL" envDefault:"INFO"`
-	HTTPPort        int    `env:"HTTP_PORT" envDefault:"8080"`
-	APIPort         int    `env:"API_PORT" envDefault:"9200"`
-	HealthPort      int    `env:"HEALTH_PORT" envDefault:"6666"`
-	HTTPMetricsPort int    `env:"METRICS_PORT" envDefault:"8888"`
-	CogSource       string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+	LogLevel          string `env:"LOG_LEVEL" envDefault:"INFO"`
+	HTTPPort          int    `env:"HTTP_PORT" envDefault:"8080"`
+	APIPort           int    `env:"API_PORT" envDefault:"9200"`
+	HealthPort        int    `env:"HEALTH_PORT" envDefault:"6666"`
+	HTTPMetricsPort   int    `env:"METRICS_PORT" envDefault:"8888"`
+	CogSource         string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+	CacheMaxSize      int64  `env:"CACHE_MAX_SIZE" envDefault:"1024"`
+	CacheItemsToPrune uint32 `env:"CACHE_ITEMS_TO_PRUNE" envDefault:"100"`
 }
 
 type Server struct {
@@ -328,7 +330,8 @@ func setupTIFFReader(cfg Config, logger *slog.Logger) (*geotiff.GeoTIFF, error) 
 		}
 		reader = file
 	}
-	return geotiff.Open(reader)
+	logger.Info("configuring tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
+	return geotiff.Open(reader, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
 }
 
 func createLogger(cfg Config, appName string) *slog.Logger {
