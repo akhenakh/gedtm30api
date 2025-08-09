@@ -49,7 +49,11 @@ document.addEventListener("DOMContentLoaded", () => {
         throw new Error(`Server error: ${response.statusText}`);
       }
       const data = await response.json();
-      infoDiv.innerHTML = `Elevation: <strong>${data.elevation.toFixed(1)} m</strong>. Click another point to create a profile.`;
+      if (data.elevation < -12000) {
+        infoDiv.innerHTML = `Elevation: <strong>No data available</strong>. Click another point to create a profile.`;
+      } else {
+        infoDiv.innerHTML = `Elevation: <strong>${data.elevation.toFixed(1)} m</strong>. Click another point to create a profile.`;
+      }
     } catch (error) {
       infoDiv.textContent = `Error: ${error.message}`;
       console.error("Failed to fetch elevation:", error);
@@ -125,7 +129,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const labels = distances.map((d) => d.toFixed(2));
-    const elevations = profileData.map((p) => p[2]);
+    const elevations = profileData.map((p) =>
+      p[2] < -12000 ? null : p[2]
+    );
 
     const ctx = chartCanvas.getContext("2d");
     profileChart = new Chart(ctx, {
