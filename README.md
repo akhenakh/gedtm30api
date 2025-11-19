@@ -10,7 +10,7 @@ The primary data source is [Global Ensemble Digital Terrain Model 30m (GEDTM30)]
 
 -   **Dual API Support**: Access elevation data through both a simple HTTP REST API and a typed, high-performance gRPC API.
 -   **Cloud-Optimized GeoTIFF (COG) Support**: Efficiently reads data from large GeoTIFF files without needing to download the entire file. It fetches only the required header information and raster tiles on-demand.
--   **Flexible Data Sources**: Works seamlessly with both remote COGs (via HTTP range requests) and local `.tiff` files.
+-   **Flexible Data Sources**: Works seamlessly with GCS, S3, Azure Blob Storage, HTTP remote COGs (via HTTP range requests) or local `.tiff` files.
 -   **High-Performance Caching**: Utilizes an in-memory LRU cache (`ccache`) to store *processed* tile data. This dramatically reduces I/O and CPU load for subsequent requests to nearby geographic areas.
 -   **Concurrent Request Handling**: Implements a `singleflight` mechanism to prevent the "thundering herd" problem, ensuring that concurrent requests for the same uncached tile result in only one fetch operation.
 -   **Intelligent Prefetching**: When a tile is requested, its neighbors are preemptively and concurrently fetched in the background to improve latency for spatially coherent queries (like generating a profile).
@@ -43,17 +43,22 @@ gedtm30api
 - API_PORT envDefault:"9200"
 - HEALTH_PORT envDefault:"6666"
 - METRICS_PORT envDefault:"8888"
+- BUCKER_URI
+  Example S3: BUCKET_URI="s3://my-bucket?region=us-east-1", OBJECT_KEY="path/to/image.tif"
+	Example GCS: BUCKET_URI="gs://my-bucket", OBJECT_KEY="image.tif"
+  Example Azure: BUCKET_URI="azblob://bucket" OBJECT_KEY="image.tif"
+	Example File: BUCKET_URI="file:///path/to/dir", OBJECT_KEY="image.tif"
 - COG_SOURCE envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+  Use it for HTTP access
 - CACHE_MAX_SIZE envDefault:"512" number of tiles to keep in the cache
 - CACHE_ITEMS_TO_PRUNE envDefault:"32" number of tiles to prune from the cache
-
 The server will start multiple services on different ports:
 -   **HTTP REST & Web UI**: `http://localhost:8080`
 -   **Prometheus Metrics**: `http://localhost:8888/metrics`
 -   **gRPC API**: `localhost:9200`
 -   **gRPC Health Checks**: `localhost:6666`
 
-### Using a Local File
+### Use a Local File
 
 To use a local GeoTIFF file, set the `COG_SOURCE` environment variable to the file path:
 
@@ -198,3 +203,5 @@ So 128 tiles would account for 128 MiB in memory.
 
 The geoTIFF library has only been tested with this specific dataset and does not support all the GeoTIFF spec (for example only DEFLATE compression is supported).
 It is reusing some code from [geotiff](https://github.com/gden173/geotiff).
+
+It was reported to work with USGS 10m data.

@@ -24,6 +24,11 @@ import (
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"gocloud.dev/blob"
+	_ "gocloud.dev/blob/azureblob" // Register Azure Blob driver
+	_ "gocloud.dev/blob/fileblob"  // Register File driver
+	_ "gocloud.dev/blob/gcsblob"   // Register GCS driver
+	_ "gocloud.dev/blob/s3blob"    // Register S3 driver
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -53,12 +58,22 @@ var (
 
 // Config holds all configuration for the application, loaded from environment variables.
 type Config struct {
-	LogLevel          string `env:"LOG_LEVEL" envDefault:"INFO"`
-	HTTPPort          int    `env:"HTTP_PORT" envDefault:"8080"`
-	APIPort           int    `env:"API_PORT" envDefault:"9200"`
-	HealthPort        int    `env:"HEALTH_PORT" envDefault:"6666"`
-	HTTPMetricsPort   int    `env:"METRICS_PORT" envDefault:"8888"`
-	CogSource         string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+	LogLevel        string `env:"LOG_LEVEL" envDefault:"INFO"`
+	HTTPPort        int    `env:"HTTP_PORT" envDefault:"8080"`
+	APIPort         int    `env:"API_PORT" envDefault:"9200"`
+	HealthPort      int    `env:"HEALTH_PORT" envDefault:"6666"`
+	HTTPMetricsPort int    `env:"METRICS_PORT" envDefault:"8888"`
+
+	// Legacy source configuration (HTTP URL or local file path)
+	CogSource string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+
+	// Cloud Blob configuration (preferred if set)
+	// Example S3: BucketURI="s3://my-bucket?region=us-east-1", ObjectKey="path/to/image.tif"
+	// Example GCS: BucketURI="gs://my-bucket", ObjectKey="image.tif"
+	// Example File: BucketURI="file:///path/to/dir", ObjectKey="image.tif"
+	BucketURI string `env:"BUCKET_URI"`
+	ObjectKey string `env:"OBJECT_KEY"`
+
 	CacheMaxSize      int64  `env:"CACHE_MAX_SIZE" envDefault:"1024"`
 	CacheItemsToPrune uint32 `env:"CACHE_ITEMS_TO_PRUNE" envDefault:"100"`
 }
@@ -79,6 +94,8 @@ func main() {
 	logger := createLogger(cfg, appName)
 	slog.SetDefault(logger)
 
+	logger.Debug("config:", "config", cfg)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -88,7 +105,9 @@ func main() {
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	geo, err := setupTIFFReader(cfg, logger)
+	// Setup GeoTIFF reader (handle cleanup within main context if needed, but GeoTIFF stays open)
+	// We pass the context for Blob initialization.
+	geo, err := setupTIFFReader(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("failed to initialize GeoTIFF reader, shutting down", "error", err)
 		os.Exit(1)
@@ -314,22 +333,43 @@ func getProfileHandler(geo *geotiff.GeoTIFF) http.HandlerFunc {
 	}
 }
 
-func setupTIFFReader(cfg Config, logger *slog.Logger) (*geotiff.GeoTIFF, error) {
-	logger.Info("initializing GeoTIFF reader", "source", cfg.CogSource)
+func setupTIFFReader(ctx context.Context, cfg Config, logger *slog.Logger) (*geotiff.GeoTIFF, error) {
 	var reader io.ReadSeeker
-	if strings.HasPrefix(cfg.CogSource, "http") {
-		r, err := geotiff.NewHTTPRangeReader(cfg.CogSource, nil) // Using default client
+
+	// Use gocloud.dev blob storage if BucketURI and ObjectKey are configured
+	if cfg.BucketURI != "" && cfg.ObjectKey != "" {
+		logger.Info("initializing Blob storage reader", "bucket", cfg.BucketURI, "key", cfg.ObjectKey)
+
+		bucket, err := blob.OpenBucket(ctx, cfg.BucketURI)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create HTTP reader for COG: %w", err)
+			return nil, fmt.Errorf("failed to open bucket %s: %w", cfg.BucketURI, err)
 		}
-		reader = r
+
+		blobReader, err := geotiff.NewBlobReader(ctx, bucket, cfg.ObjectKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create blob reader for key %s: %w", cfg.ObjectKey, err)
+		}
+		reader = blobReader
+
 	} else {
-		file, err := os.Open(cfg.CogSource)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open local COG file: %w", err)
+		// Fallback to legacy COG_SOURCE configuration
+		logger.Info("initializing Legacy COG reader", "source", cfg.CogSource)
+		if strings.HasPrefix(cfg.CogSource, "http://") || strings.HasPrefix(cfg.CogSource, "https://") {
+			r, err := geotiff.NewHTTPRangeReader(cfg.CogSource, nil) // Using default client
+			if err != nil {
+				return nil, fmt.Errorf("failed to create HTTP reader for COG: %w", err)
+			}
+			reader = r
+		} else {
+			// Assuming local file
+			file, err := os.Open(cfg.CogSource)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open local COG file: %w", err)
+			}
+			reader = file
 		}
-		reader = file
 	}
+
 	logger.Info("configuring tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
 	return geotiff.Open(reader, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
 }
