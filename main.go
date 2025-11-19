@@ -65,7 +65,7 @@ type Config struct {
 	HTTPMetricsPort int    `env:"METRICS_PORT" envDefault:"8888"`
 
 	// Legacy source configuration (HTTP URL or local file path)
-	CogSource string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+	CogSource string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif"`
 
 	// Cloud Blob configuration (preferred if set)
 	// Example S3: BucketURI="s3://my-bucket?region=us-east-1", ObjectKey="path/to/image.tif"
