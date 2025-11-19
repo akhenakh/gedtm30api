@@ -58,7 +58,7 @@ type Config struct {
 	APIPort           int    `env:"API_PORT" envDefault:"9200"`
 	HealthPort        int    `env:"HEALTH_PORT" envDefault:"6666"`
 	HTTPMetricsPort   int    `env:"METRICS_PORT" envDefault:"8888"`
-	CogSource         string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+	CogSource         string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif"`
 	CacheMaxSize      int64  `env:"CACHE_MAX_SIZE" envDefault:"1024"`
 	CacheItemsToPrune uint32 `env:"CACHE_ITEMS_TO_PRUNE" envDefault:"100"`
 }
