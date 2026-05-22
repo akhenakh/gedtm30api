@@ -72,6 +72,7 @@ const (
 
 const (
 	Uncompressed = 1
+	LZW          = 5
 	DEFLATE      = 8
 )
 

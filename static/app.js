@@ -22,19 +22,18 @@ document.addEventListener("DOMContentLoaded", () => {
    */
   async function onMapClick(e) {
     const { lat, lng } = e.latlng;
+    const wrappedLng = ((lng + 180) % 360 + 360) % 360 - 180;
 
-    points.push([lat, lng]);
-    const marker = L.marker([lat, lng]).addTo(map);
+    points.push([lat, wrappedLng]);
+    const marker = L.marker([lat, wrappedLng]).addTo(map);
     markers.push(marker);
 
     if (points.length === 1) {
       infoDiv.textContent = "Fetching elevation...";
-      // This call is not awaited, which is fine for a single point.
-      getSinglePointElevation(lat, lng);
+      getSinglePointElevation(lat, wrappedLng);
     } else {
       infoDiv.textContent = "Fetching elevation profile...";
       updatePolyline();
-      // We use `await` to ensure we wait for the profile data before proceeding.
       await getProfile();
     }
   }

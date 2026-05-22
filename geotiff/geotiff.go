@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math"
 	"strconv"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/karlseguin/ccache/v3"
 	"golang.org/x/sync/singleflight"
@@ -50,6 +52,8 @@ type Tags map[Tag]tagData
 
 // GeoTIFF represents a parsed GeoTIFF file with its metadata and data access capabilities
 type GeoTIFF struct {
+	Name string
+
 	// reader is the underlying source for the GeoTIFF data. It must implement
 	// io.ReadSeeker and io.ReaderAt for efficient access, especially for remote files.
 	reader io.ReadSeeker
@@ -119,6 +123,14 @@ type GeoTIFF struct {
 	// tilesAcross is a pre-calculated value for the number of tiles in the horizontal
 	// direction, used to quickly compute a tile's index from its X/Y coordinates.
 	tilesAcross int
+
+	// remoteTIFF is a libtiff handle (TIFF*) used for remote LZW tile decoding.
+	// It is lazily opened on first LZW tile access and closed when the GeoTIFF
+	// is garbage collected. nil when not used.
+	remoteTIFF   unsafe.Pointer
+	remoteTIFFMu sync.Mutex
+	// readTIFFMu serializes TIFFReadEncodedTile calls on the remote handle.
+	readTIFFMu sync.Mutex
 }
 
 type Point struct{ Lon, Lat float64 }
@@ -188,7 +200,6 @@ func Open(r io.ReadSeeker, cacheSize int64, itemsToPrune uint32) (*GeoTIFF, erro
 	}
 
 	// Initialize the GeoTIFF struct with basic file information
-
 	g := &GeoTIFF{
 		reader:    r,
 		tags:      gTags,
@@ -617,15 +628,21 @@ func (g *GeoTIFF) loc(x, y int) (float32, error) {
 // getTileData retrieves a tile, processes it into a typed slice, and caches the result.
 func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 	key := strconv.Itoa(tileNum)
-	// Check for a processed tile in the cache.
 	item := g.tileCache.Get(key)
 	if item != nil && !item.Expired() {
 		return item.Value(), nil
 	}
 
-	// If not in cache, use singleflight to ensure only one goroutine
-	// fetches and processes the tile.
 	v, err, _ := g.inflightData.Do(key, func() (interface{}, error) {
+		if g.compression == LZW {
+			data, lerr := g.getLZWTileData(tileNum)
+			if lerr != nil {
+				return nil, lerr
+			}
+			return data, nil
+		}
+
+		slog.Debug("fetching tile", "file", g.Name, "tile", tileNum, "compression", g.compression, "predictor", g.predictor, "sampleFormat", g.sampleFormat)
 		// 1. Fetch and decompress raw bytes.
 		decompressedBytes, fetchErr := g.fetchAndDecompressTile(tileNum)
 		if fetchErr != nil {
@@ -646,6 +663,9 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 			if err := binary.Read(bytes.NewReader(decompressedBytes), g.byteOrder, &tileData); err != nil {
 				processingErr = err
 			} else {
+		if g.predictor == PredictorFloatingPoint {
+					undoHorizontalPredictionForFloat32(tileData, g.tileWidth, g.tileLength)
+				}
 				processedData = tileData
 			}
 		case SampleFormatInt:
@@ -681,6 +701,70 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 	return v, nil
 }
 
+func (g *GeoTIFF) getLZWTileData(tileNum int) (any, error) {
+	path := getFilePath(g.reader)
+	if path != "" {
+		return g.getLZWTileDataFromFile(path, tileNum)
+	}
+	return g.getLZWTileDataFromBytes(tileNum)
+}
+
+func (g *GeoTIFF) getLZWTileDataFromFile(path string, tileNum int) (any, error) {
+	slog.Debug("libtiff LZW decode from file", "file", path, "tile", tileNum)
+	raw, err := libtiffDecodeTile(path, tileNum)
+	if err != nil {
+		return nil, fmt.Errorf("libtiff decode tile %d: %w", tileNum, err)
+	}
+	return g.processDecompressedTile(tileNum, raw)
+}
+
+func (g *GeoTIFF) getLZWTileDataFromBytes(tileNum int) (any, error) {
+	readerAt, ok := g.reader.(io.ReaderAt)
+	if !ok {
+		return nil, errors.New("reader does not support ReadAt for LZW decoding")
+	}
+
+	g.remoteTIFFMu.Lock()
+	tif := g.remoteTIFF
+	g.remoteTIFFMu.Unlock()
+
+	if tif == nil {
+		size, err := g.reader.Seek(0, io.SeekEnd)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get file size for LZW: %w", err)
+		}
+
+		slog.Debug("libtiff opening remote TIFF", "file", g.Name)
+		tif, err = openRemoteTIFF(readerAt, size)
+		if err != nil {
+			return nil, fmt.Errorf("libtiff open remote: %w", err)
+		}
+
+		g.remoteTIFFMu.Lock()
+		g.remoteTIFF = tif
+		g.remoteTIFFMu.Unlock()
+	}
+
+	slog.Debug("libtiff LZW decode from remote", "file", g.Name, "tile", tileNum)
+	g.readTIFFMu.Lock()
+	raw, err := readTileFromHandle(tif, tileNum)
+	g.readTIFFMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("libtiff remote decode tile %d: %w", tileNum, err)
+	}
+	return g.processDecompressedTile(tileNum, raw)
+}
+
+func (g *GeoTIFF) processDecompressedTile(tileNum int, raw []byte) (any, error) {
+	numPixels := len(raw) / 4
+	tileData := make([]float32, numPixels)
+	if err := binary.Read(bytes.NewReader(raw), g.byteOrder, &tileData); err != nil {
+		return nil, err
+	}
+	g.tileCache.Set(strconv.Itoa(tileNum), tileData, 10*time.Minute)
+	return tileData, nil
+}
+
 // fetchAndDecompressTile performs the I/O to read and decompress a single tile.
 // This function remains unchanged.
 func (g *GeoTIFF) fetchAndDecompressTile(tileNum int) ([]byte, error) {
@@ -699,6 +783,12 @@ func (g *GeoTIFF) fetchAndDecompressTile(tileNum int) ([]byte, error) {
 	if _, err := readerAt.ReadAt(tileBytes, int64(offset)); err != nil {
 		return nil, fmt.Errorf("failed to read tile %d from source: %w", tileNum, err)
 	}
+
+	n := 20
+	if len(tileBytes) < n {
+		n = len(tileBytes)
+	}
+	slog.Debug("raw tile data", "file", g.Name, "tile", tileNum, "offset", offset, "byteCount", byteCount, "firstBytes", tileBytes[:n])
 
 	var decompressedBytes []byte
 	switch g.compression {
@@ -752,7 +842,7 @@ func (g *GeoTIFF) prefetchNeighbors(tileNum int) {
 			}
 		}
 	}
-	wg.Wait() // Wait for all neighbor fetches to complete.
+	wg.Wait()
 }
 
 func (g *GeoTIFF) getUint(tag Tag) (uint64, bool) {
@@ -833,6 +923,30 @@ func undoHorizontalPredictionForInt32(data []int32, tileWidth, tileHeight uint32
 			index := rowStart + x
 			prevIndex := index - 1
 			data[index] += data[prevIndex]
+		}
+	}
+}
+
+func undoHorizontalPredictionForFloat32(data []float32, tileWidth, tileHeight uint32) {
+	if tileWidth == 0 || tileHeight == 0 {
+		return
+	}
+	bytesPerSample := 4
+	rowBytes := int(tileWidth) * bytesPerSample
+
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*bytesPerSample)
+
+	for y := 0; y < int(tileHeight); y++ {
+		rowStart := y * rowBytes
+		if rowStart+rowBytes > len(raw) {
+			break
+		}
+		firstOff := rowStart
+		for x := 1; x < int(tileWidth); x++ {
+			sampleOff := rowStart + x*bytesPerSample
+			for b := 0; b < bytesPerSample; b++ {
+				raw[sampleOff+b] += raw[firstOff+b]
+			}
 		}
 	}
 }

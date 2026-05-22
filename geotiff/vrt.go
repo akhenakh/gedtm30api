@@ -58,6 +58,37 @@ type VRTSourceInfo struct {
 
 type ReaderFactory func(ctx context.Context, filename string) (io.ReadSeeker, error)
 
+func resolveVRTFilename(baseURL, filename string, relative bool) string {
+	if filename == "" {
+		return filename
+	}
+
+	// GDAL virtual filesystem prefixes
+	if rest, ok := strings.CutPrefix(filename, "/vsicurl/"); ok {
+		return rest
+	}
+	if strings.HasPrefix(filename, "/vsi") {
+		idx := strings.Index(filename[1:], "/")
+		if idx >= 0 {
+			return filename[idx+2:]
+		}
+		return filename
+	}
+
+	if !relative {
+		return filename
+	}
+
+	if baseURL == "" {
+		return filename
+	}
+
+	if idx := strings.LastIndex(baseURL, "/"); idx >= 0 {
+		return baseURL[:idx+1] + filename
+	}
+	return baseURL + "/" + filename
+}
+
 type VRTGeo struct {
 	imageWidth  int
 	imageLength int
@@ -66,6 +97,7 @@ type VRTGeo struct {
 	originX     float64
 	originY     float64
 	sources     []VRTSourceInfo
+	vrtBaseURL  string
 
 	readerFactory ReaderFactory
 	sourceReaders map[string]*GeoTIFF
@@ -222,6 +254,19 @@ func (v *VRTGeo) findSource(x, y int) (*VRTSourceInfo, error) {
 	return nil, fmt.Errorf("no source covers pixel (%d, %d)", x, y)
 }
 
+func (v *VRTGeo) SetBaseURL(baseURL string) {
+	v.vrtBaseURL = baseURL
+}
+
+func (v *VRTGeo) findSourceByFilename(filename string) *VRTSourceInfo {
+	for i := range v.sources {
+		if v.sources[i].Filename == filename {
+			return &v.sources[i]
+		}
+	}
+	return nil
+}
+
 func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 	v.mu.Lock()
 	if geo, ok := v.sourceReaders[filename]; ok {
@@ -238,8 +283,14 @@ func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 		}
 		v.mu.Unlock()
 
-		slog.Debug("VRT opening source GeoTIFF", "filename", filename)
-		reader, err := v.readerFactory(context.Background(), filename)
+		src := v.findSourceByFilename(filename)
+		resolved := filename
+		if src != nil && v.vrtBaseURL != "" {
+			resolved = resolveVRTFilename(v.vrtBaseURL, filename, src.Relative)
+		}
+
+		slog.Debug("VRT opening source GeoTIFF", "filename", filename, "resolved", resolved)
+		reader, err := v.readerFactory(context.Background(), resolved)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create reader for source %s: %w", filename, err)
 		}
@@ -248,7 +299,7 @@ func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to open source GeoTIFF %s: %w", filename, err)
 		}
-		geo.Name = filename
+		geo.Name = resolved
 
 		v.mu.Lock()
 		v.sourceReaders[filename] = geo
@@ -289,8 +340,16 @@ func (v *VRTGeo) Profile(coordinates [][]float64) ([][]float64, error) {
 		startLat, startLon := startCoords[0], startCoords[1]
 		endLat, endLon := endCoords[0], endCoords[1]
 
-			x1, y1 := v.coordToPixel(startLon, startLat, bounds)
-			x2, y2 := v.coordToPixel(endLon, endLat, bounds)
+		x1, y1, err := v.coordToPixelChecked(startLon, startLat, bounds)
+		if err != nil {
+			slog.Debug("VRT profile: start point outside bounds, skipping segment", "seg", i, "lat", startLat, "lon", startLon, "error", err)
+			continue
+		}
+		x2, y2, err := v.coordToPixelChecked(endLon, endLat, bounds)
+		if err != nil {
+			slog.Debug("VRT profile: end point outside bounds, skipping segment", "seg", i, "lat", endLat, "lon", endLon, "error", err)
+			continue
+		}
 
 			slog.Debug("VRT profile segment", "seg", i, "startLat", startLat, "startLon", startLon, "endLat", endLat, "endLon", endLon, "startPx", x1, "startPy", y1, "endPx", x2, "endPy", y2)
 
@@ -335,6 +394,14 @@ func (v *VRTGeo) coordToPixel(lon, lat float64, bounds *CornerCoordinates) (int,
 	x := int(math.Round(math.Abs(lon-bounds.UpperLeft.Lon) / v.PixelScaleX))
 	y := int(math.Round(math.Abs(lat-bounds.UpperLeft.Lat) / math.Abs(v.PixelScaleY)))
 	return x, y
+}
+
+func (v *VRTGeo) coordToPixelChecked(lon, lat float64, bounds *CornerCoordinates) (int, int, error) {
+	if !bounds.Contains(Point{Lon: lon, Lat: lat}) {
+		return 0, 0, fmt.Errorf("point (Lon: %f, Lat: %f) is outside the image bounds", lon, lat)
+	}
+	x, y := v.coordToPixel(lon, lat, bounds)
+	return x, y, nil
 }
 
 func (v *VRTGeo) pixelToCoord(x, y int, bounds *CornerCoordinates) (float64, float64) {
