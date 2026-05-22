@@ -1,0 +1,25 @@
+<VRTDataset rasterXSize="739" rasterYSize="795">
+  <SRS dataAxisToSRSAxisMapping="2,1">GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]</SRS>
+  <GeoTransform>  6.7792500000000002e+00,  2.5000000000000028e-04,  0.0000000000000000e+00,  4.5926250000000003e+01,  0.0000000000000000e+00, -2.5000000000000499e-04</GeoTransform>
+  <VRTRasterBand dataType="Float32" band="1">
+    <Metadata>
+      <MDI key="STATISTICS_APPROXIMATE">YES</MDI>
+      <MDI key="STATISTICS_MAXIMUM">4803.18359375</MDI>
+      <MDI key="STATISTICS_MEAN">2504.9227149847</MDI>
+      <MDI key="STATISTICS_MINIMUM">911.68475341797</MDI>
+      <MDI key="STATISTICS_STDDEV">744.55769680532</MDI>
+      <MDI key="STATISTICS_VALID_PERCENT">100</MDI>
+    </Metadata>
+    <NoDataValue>-2147483648</NoDataValue>
+    <ColorInterp>Gray</ColorInterp>
+    <ComplexSource>
+      <SourceFilename relativeToVRT="1">extend-cog.tiff</SourceFilename>
+      <SourceBand>1</SourceBand>
+      <SourceProperties RasterXSize="739" RasterYSize="795" DataType="Float32" BlockXSize="512" BlockYSize="512" />
+      <SrcRect xOff="0" yOff="0" xSize="739" ySize="795" />
+      <DstRect xOff="0" yOff="0" xSize="739" ySize="795" />
+      <NODATA>-2147483648</NODATA>
+    </ComplexSource>
+  </VRTRasterBand>
+  <OverviewList resampling="nearest">2</OverviewList>
+</VRTDataset>
