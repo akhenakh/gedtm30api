@@ -24,6 +24,11 @@ import (
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"gocloud.dev/blob"
+	_ "gocloud.dev/blob/azureblob" // Register Azure Blob driver
+	_ "gocloud.dev/blob/fileblob"  // Register File driver
+	_ "gocloud.dev/blob/gcsblob"   // Register GCS driver
+	_ "gocloud.dev/blob/s3blob"    // Register S3 driver
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -53,19 +58,29 @@ var (
 
 // Config holds all configuration for the application, loaded from environment variables.
 type Config struct {
-	LogLevel          string `env:"LOG_LEVEL" envDefault:"INFO"`
-	HTTPPort          int    `env:"HTTP_PORT" envDefault:"8080"`
-	APIPort           int    `env:"API_PORT" envDefault:"9200"`
-	HealthPort        int    `env:"HEALTH_PORT" envDefault:"6666"`
-	HTTPMetricsPort   int    `env:"METRICS_PORT" envDefault:"8888"`
-	CogSource         string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif"`
+	LogLevel        string `env:"LOG_LEVEL" envDefault:"INFO"`
+	HTTPPort        int    `env:"HTTP_PORT" envDefault:"8080"`
+	APIPort         int    `env:"API_PORT" envDefault:"9200"`
+	HealthPort      int    `env:"HEALTH_PORT" envDefault:"6666"`
+	HTTPMetricsPort int    `env:"METRICS_PORT" envDefault:"8888"`
+
+	// Legacy source configuration (HTTP URL or local file path)
+	CogSource string `env:"COG_SOURCE" envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif"`
+
+	// Cloud Blob configuration (preferred if set)
+	// Example S3: BucketURI="s3://my-bucket?region=us-east-1", ObjectKey="path/to/image.tif"
+	// Example GCS: BucketURI="gs://my-bucket", ObjectKey="image.tif"
+	// Example File: BucketURI="file:///path/to/dir", ObjectKey="image.tif"
+	BucketURI string `env:"BUCKET_URI"`
+	ObjectKey string `env:"OBJECT_KEY"`
+
 	CacheMaxSize      int64  `env:"CACHE_MAX_SIZE" envDefault:"1024"`
 	CacheItemsToPrune uint32 `env:"CACHE_ITEMS_TO_PRUNE" envDefault:"100"`
 }
 
 type Server struct {
 	pb.UnimplementedElevationServiceServer
-	geo          *geotiff.GeoTIFF
+	geo          geotiff.GeoRaster
 	healthServer *health.Server
 }
 
@@ -79,6 +94,8 @@ func main() {
 	logger := createLogger(cfg, appName)
 	slog.SetDefault(logger)
 
+	logger.Debug("config:", "config", cfg)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -88,7 +105,9 @@ func main() {
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	geo, err := setupTIFFReader(cfg, logger)
+	// Setup GeoTIFF reader (handle cleanup within main context if needed, but GeoTIFF stays open)
+	// We pass the context for Blob initialization.
+	geo, err := setupTIFFReader(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("failed to initialize GeoTIFF reader, shutting down", "error", err)
 		os.Exit(1)
@@ -184,7 +203,7 @@ func startMetricsServer(logger *slog.Logger, cfg Config) error {
 	return nil
 }
 
-func startGRPCAPIServer(logger *slog.Logger, cfg Config, healthServer *health.Server, geo *geotiff.GeoTIFF) error {
+func startGRPCAPIServer(logger *slog.Logger, cfg Config, healthServer *health.Server, geo geotiff.GeoRaster) error {
 	addr := fmt.Sprintf(":%d", cfg.APIPort)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -215,7 +234,7 @@ func startGRPCAPIServer(logger *slog.Logger, cfg Config, healthServer *health.Se
 	return grpcAPIServer.Serve(lis)
 }
 
-func startHTTPRestUIServer(logger *slog.Logger, cfg Config, geo *geotiff.GeoTIFF) error {
+func startHTTPRestUIServer(logger *slog.Logger, cfg Config, geo geotiff.GeoRaster) error {
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
 	mux := http.NewServeMux()
 
@@ -269,7 +288,7 @@ func (s *Server) GetProfile(ctx context.Context, req *pb.ProfileRequest) (*pb.Pr
 	return &pb.ProfileResponse{Points: responsePoints}, nil
 }
 
-func getElevationHandler(geo *geotiff.GeoTIFF) http.HandlerFunc {
+func getElevationHandler(geo geotiff.GeoRaster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/getElevation/"), "/")
 		if len(pathParts) != 2 {
@@ -288,7 +307,11 @@ func getElevationHandler(geo *geotiff.GeoTIFF) http.HandlerFunc {
 		}
 		value, err := geo.AtCoord(lng, lat)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Could not retrieve elevation: %v", err), http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "does not fall inside") {
+				status = http.StatusNotFound
+			}
+			http.Error(w, fmt.Sprintf("Could not retrieve elevation: %v", err), status)
 			return
 		}
 		response := map[string]interface{}{"latitude": lat, "longitude": lng, "elevation": value}
@@ -297,7 +320,7 @@ func getElevationHandler(geo *geotiff.GeoTIFF) http.HandlerFunc {
 	}
 }
 
-func getProfileHandler(geo *geotiff.GeoTIFF) http.HandlerFunc {
+func getProfileHandler(geo geotiff.GeoRaster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req [][]float64
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -309,29 +332,127 @@ func getProfileHandler(geo *geotiff.GeoTIFF) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("Could not generate profile: %v", err), http.StatusInternalServerError)
 			return
 		}
+		if len(profile) == 0 {
+			http.Error(w, "All coordinates are outside the dataset bounds", http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(profile)
 	}
 }
 
-func setupTIFFReader(cfg Config, logger *slog.Logger) (*geotiff.GeoTIFF, error) {
-	logger.Info("initializing GeoTIFF reader", "source", cfg.CogSource)
+func setupTIFFReader(ctx context.Context, cfg Config, logger *slog.Logger) (geotiff.GeoRaster, error) {
 	var reader io.ReadSeeker
-	if strings.HasPrefix(cfg.CogSource, "http") {
-		r, err := geotiff.NewHTTPRangeReader(cfg.CogSource, nil) // Using default client
+
+	if cfg.BucketURI != "" && cfg.ObjectKey != "" {
+		logger.Info("initializing Blob storage reader", "bucket", cfg.BucketURI, "key", cfg.ObjectKey)
+
+		bucket, err := blob.OpenBucket(ctx, cfg.BucketURI)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create HTTP reader for COG: %w", err)
+			return nil, fmt.Errorf("failed to open bucket %s: %w", cfg.BucketURI, err)
 		}
-		reader = r
+
+		if strings.HasSuffix(cfg.ObjectKey, ".vrt") {
+			return setupBlobVRTReader(ctx, bucket, cfg, logger)
+		}
+
+		blobReader, err := geotiff.NewBlobReader(ctx, bucket, cfg.ObjectKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create blob reader for key %s: %w", cfg.ObjectKey, err)
+		}
+		reader = blobReader
+
 	} else {
-		file, err := os.Open(cfg.CogSource)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open local COG file: %w", err)
+		logger.Info("initializing Legacy COG reader", "source", cfg.CogSource)
+
+		if strings.HasSuffix(cfg.CogSource, ".vrt") {
+			if strings.HasPrefix(cfg.CogSource, "http://") || strings.HasPrefix(cfg.CogSource, "https://") {
+				return setupHTTPVRTReader(ctx, cfg, logger)
+			}
+			return setupLocalVRTReader(ctx, cfg, logger)
 		}
-		reader = file
+
+		if strings.HasPrefix(cfg.CogSource, "http://") || strings.HasPrefix(cfg.CogSource, "https://") {
+			r, err := geotiff.NewHTTPRangeReader(cfg.CogSource, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create HTTP reader for COG: %w", err)
+			}
+			reader = r
+		} else {
+			file, err := os.Open(cfg.CogSource)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open local COG file: %w", err)
+			}
+			reader = file
+		}
 	}
+
 	logger.Info("configuring tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
 	return geotiff.Open(reader, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
+}
+
+func setupBlobVRTReader(ctx context.Context, bucket *blob.Bucket, cfg Config, logger *slog.Logger) (geotiff.GeoRaster, error) {
+	vrtReader, err := geotiff.NewBlobReader(ctx, bucket, cfg.ObjectKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create blob reader for VRT: %w", err)
+	}
+
+	baseDir := cfg.ObjectKey
+	if idx := strings.LastIndex(baseDir, "/"); idx >= 0 {
+		baseDir = baseDir[:idx]
+	} else {
+		baseDir = ""
+	}
+
+	factory := func(innerCtx context.Context, filename string) (io.ReadSeeker, error) {
+		return geotiff.NewBlobReader(innerCtx, bucket, filename)
+	}
+
+	logger.Info("configuring VRT tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
+	vrt, err := geotiff.OpenVRT(vrtReader, factory, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
+	if err != nil {
+		return nil, err
+	}
+	vrt.SetBaseURL(cfg.ObjectKey)
+	return vrt, nil
+}
+
+func setupHTTPVRTReader(ctx context.Context, cfg Config, logger *slog.Logger) (geotiff.GeoRaster, error) {
+	r, err := geotiff.NewHTTPRangeReader(cfg.CogSource, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP reader for VRT: %w", err)
+	}
+
+	factory := func(innerCtx context.Context, filename string) (io.ReadSeeker, error) {
+		return geotiff.NewHTTPRangeReader(filename, nil)
+	}
+
+	logger.Info("configuring VRT tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
+	vrt, err := geotiff.OpenVRT(r, factory, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
+	if err != nil {
+		return nil, err
+	}
+	vrt.SetBaseURL(cfg.CogSource)
+	return vrt, nil
+}
+
+func setupLocalVRTReader(ctx context.Context, cfg Config, logger *slog.Logger) (geotiff.GeoRaster, error) {
+	f, err := os.Open(cfg.CogSource)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open local VRT file: %w", err)
+	}
+
+	factory := func(innerCtx context.Context, filename string) (io.ReadSeeker, error) {
+		return os.Open(filename)
+	}
+
+	logger.Info("configuring VRT tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
+	vrt, err := geotiff.OpenVRT(f, factory, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
+	if err != nil {
+		return nil, err
+	}
+	vrt.SetBaseURL(cfg.CogSource)
+	return vrt, nil
 }
 
 func createLogger(cfg Config, appName string) *slog.Logger {

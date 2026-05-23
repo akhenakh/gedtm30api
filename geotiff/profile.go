@@ -3,7 +3,7 @@ package geotiff
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 )
 
@@ -89,7 +89,7 @@ func (g *GeoTIFF) Profile(coordinates [][]float64) ([][]float64, error) {
 
 			elevation, err := g.loc(currX, currY)
 			if err != nil {
-				log.Printf("Warning: could not get elevation for pixel (%d, %d): %v", currX, currY, err)
+				slog.Warn("could not get elevation for pixel, skipping", "pixelX", currX, "pixelY", currY, "error", err)
 				continue
 			}
 
