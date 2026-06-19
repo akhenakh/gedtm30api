@@ -4,7 +4,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=1 go build -ldflags="-s -w" -trimpath
+RUN GOAMD64=v3 CGO_ENABLED=1 go build -ldflags="-s -w" -trimpath
 FROM gcr.io/distroless/cc-debian13
 WORKDIR /
 COPY --from=builder /usr/lib/x86_64-linux-gnu/libtiff.so* /usr/lib/x86_64-linux-gnu/

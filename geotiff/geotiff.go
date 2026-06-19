@@ -705,30 +705,20 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 			if g.bitsPerSample != 32 {
 				return nil, fmt.Errorf("unsupported bit depth for float: %d", g.bitsPerSample)
 			}
-			numPixelsInTile := len(decompressedBytes) / 4
-			tileData := make([]float32, numPixelsInTile)
-			if err := binary.Read(bytes.NewReader(decompressedBytes), g.byteOrder, &tileData); err != nil {
-				processingErr = err
-			} else {
-		if g.predictor == PredictorFloatingPoint {
-					undoHorizontalPredictionForFloat32(tileData, g.tileWidth, g.tileLength)
-				}
-				processedData = tileData
+			tileData := decodeFloat32(decompressedBytes, g.byteOrder)
+			if g.predictor == PredictorFloatingPoint {
+				undoHorizontalPredictionForFloat32(tileData, g.tileWidth, g.tileLength)
 			}
+			processedData = tileData
 		case SampleFormatInt:
 			if g.bitsPerSample != 32 {
 				return nil, fmt.Errorf("unsupported bit depth for int: %d", g.bitsPerSample)
 			}
-			numPixelsInTile := len(decompressedBytes) / 4
-			tileData := make([]int32, numPixelsInTile)
-			if err := binary.Read(bytes.NewReader(decompressedBytes), g.byteOrder, &tileData); err != nil {
-				processingErr = err
-			} else {
-				if g.predictor == PredictorHorizontal {
-					undoHorizontalPredictionForInt32(tileData, g.tileWidth, g.tileLength)
-				}
-				processedData = tileData
+			tileData := decodeInt32(decompressedBytes, g.byteOrder)
+			if g.predictor == PredictorHorizontal {
+				undoHorizontalPredictionForInt32(tileData, g.tileWidth, g.tileLength)
 			}
+			processedData = tileData
 		default:
 			processingErr = fmt.Errorf("unsupported sample format (SampleFormat: %d, BitsPerSample: %d)", g.sampleFormat, g.bitsPerSample)
 		}
@@ -867,12 +857,31 @@ func (g *GeoTIFF) finalizeRemote() {
 	}
 }
 
-func (g *GeoTIFF) processDecompressedTile(tileNum int, raw []byte) (any, error) {
-	numPixels := len(raw) / 4
-	tileData := make([]float32, numPixels)
-	if err := binary.Read(bytes.NewReader(raw), g.byteOrder, &tileData); err != nil {
-		return nil, err
+// decodeFloat32 interprets raw bytes as float32 samples in the given byte
+// order. It replaces binary.Read into a slice, whose reflection-based path is
+// ~100x slower per element — negligible on a fast desktop CPU but hundreds of
+// milliseconds per tile on small/burstable cloud instances.
+func decodeFloat32(raw []byte, bo binary.ByteOrder) []float32 {
+	n := len(raw) / 4
+	out := make([]float32, n)
+	for i := 0; i < n; i++ {
+		out[i] = math.Float32frombits(bo.Uint32(raw[i*4:]))
 	}
+	return out
+}
+
+// decodeInt32 interprets raw bytes as int32 samples in the given byte order.
+func decodeInt32(raw []byte, bo binary.ByteOrder) []int32 {
+	n := len(raw) / 4
+	out := make([]int32, n)
+	for i := 0; i < n; i++ {
+		out[i] = int32(bo.Uint32(raw[i*4:]))
+	}
+	return out
+}
+
+func (g *GeoTIFF) processDecompressedTile(tileNum int, raw []byte) (any, error) {
+	tileData := decodeFloat32(raw, g.byteOrder)
 	g.tileCache.Set(g.cacheKeyPrefix+strconv.Itoa(tileNum), tileData, 10*time.Minute)
 	return tileData, nil
 }
