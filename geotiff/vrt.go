@@ -1,6 +1,7 @@
 package geotiff
 
 import (
+	"container/list"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -12,8 +13,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/karlseguin/ccache/v3"
 	"golang.org/x/sync/singleflight"
 )
+
+// defaultMaxOpenSources bounds how many source GeoTIFF handles a VRT keeps open
+// at once when no explicit limit is configured.
+const defaultMaxOpenSources = 256
 
 type vrtXML struct {
 	RasterXSize  float64 `xml:"rasterXSize,attr"`
@@ -100,13 +106,29 @@ type VRTGeo struct {
 	vrtBaseURL  string
 
 	readerFactory ReaderFactory
-	sourceReaders map[string]*GeoTIFF
+
+	// tileCache is shared by every source GeoTIFF so MaxSize bounds the total
+	// number of cached tiles across the whole VRT (see GeoTIFF.cacheKeyPrefix).
+	tileCache *ccache.Cache[any]
+
+	// sourceReaders / sourceLRU form a count-bounded LRU of open source
+	// handles. Evicted sources are dropped here; their libtiff handles are
+	// reclaimed by GeoTIFF.finalizeRemote once no read still references them.
+	sourceReaders map[string]*list.Element
+	sourceLRU     *list.List
+	maxSources    int
 	mu            sync.Mutex
 
 	inflight singleflight.Group
 }
 
-func OpenVRT(r io.Reader, readerFactory ReaderFactory, cacheSize int64, itemsToPrune uint32) (*VRTGeo, error) {
+// sourceEntry is the value stored in the source LRU list.
+type sourceEntry struct {
+	filename string
+	geo      *GeoTIFF
+}
+
+func OpenVRT(r io.Reader, readerFactory ReaderFactory, cacheSize int64, itemsToPrune uint32, maxOpenSources int) (*VRTGeo, error) {
 	var vrt vrtXML
 	if err := xml.NewDecoder(r).Decode(&vrt); err != nil {
 		return nil, fmt.Errorf("failed to parse VRT XML: %w", err)
@@ -171,6 +193,10 @@ func OpenVRT(r io.Reader, readerFactory ReaderFactory, cacheSize int64, itemsToP
 
 	slog.Debug("VRT parsed", "rasterXSize", vrt.RasterXSize, "rasterYSize", vrt.RasterYSize, "pixelScaleX", geoTransform[1], "pixelScaleY", pixelScaleY, "originX", geoTransform[0], "originY", geoTransform[3], "numSources", len(sources))
 
+	if maxOpenSources <= 0 {
+		maxOpenSources = defaultMaxOpenSources
+	}
+
 	return &VRTGeo{
 		imageWidth:    int(math.Round(vrt.RasterXSize)),
 		imageLength:   int(math.Round(vrt.RasterYSize)),
@@ -180,8 +206,45 @@ func OpenVRT(r io.Reader, readerFactory ReaderFactory, cacheSize int64, itemsToP
 		originY:       geoTransform[3],
 		sources:       sources,
 		readerFactory: readerFactory,
-		sourceReaders: make(map[string]*GeoTIFF),
+		tileCache:     ccache.New(ccache.Configure[any]().MaxSize(cacheSize).ItemsToPrune(itemsToPrune)),
+		sourceReaders: make(map[string]*list.Element),
+		sourceLRU:     list.New(),
+		maxSources:    maxOpenSources,
 	}, nil
+}
+
+// lruGet returns a cached source and marks it most-recently-used.
+// The caller must hold v.mu.
+func (v *VRTGeo) lruGet(filename string) (*GeoTIFF, bool) {
+	if el, ok := v.sourceReaders[filename]; ok {
+		v.sourceLRU.MoveToFront(el)
+		return el.Value.(*sourceEntry).geo, true
+	}
+	return nil, false
+}
+
+// lruPut inserts a source as most-recently-used and evicts the
+// least-recently-used handles past maxSources. The caller must hold v.mu.
+func (v *VRTGeo) lruPut(filename string, geo *GeoTIFF) {
+	if el, ok := v.sourceReaders[filename]; ok {
+		el.Value.(*sourceEntry).geo = geo
+		v.sourceLRU.MoveToFront(el)
+		return
+	}
+	v.sourceReaders[filename] = v.sourceLRU.PushFront(&sourceEntry{filename: filename, geo: geo})
+
+	for v.sourceLRU.Len() > v.maxSources {
+		back := v.sourceLRU.Back()
+		if back == nil {
+			break
+		}
+		ent := back.Value.(*sourceEntry)
+		v.sourceLRU.Remove(back)
+		delete(v.sourceReaders, ent.filename)
+		slog.Debug("VRT evicting source GeoTIFF from LRU", "filename", ent.filename, "open", v.sourceLRU.Len())
+		// The handle is released by ent.geo's finalizer once no in-flight read
+		// still references it; cached tiles persist in the shared tile cache.
+	}
 }
 
 func (v *VRTGeo) AtCoord(lon, lat float64) (float32, error) {
@@ -269,7 +332,7 @@ func (v *VRTGeo) findSourceByFilename(filename string) *VRTSourceInfo {
 
 func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 	v.mu.Lock()
-	if geo, ok := v.sourceReaders[filename]; ok {
+	if geo, ok := v.lruGet(filename); ok {
 		v.mu.Unlock()
 		return geo, nil
 	}
@@ -277,7 +340,7 @@ func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 
 	vgeo, err, _ := v.inflight.Do(filename, func() (interface{}, error) {
 		v.mu.Lock()
-		if geo, ok := v.sourceReaders[filename]; ok {
+		if geo, ok := v.lruGet(filename); ok {
 			v.mu.Unlock()
 			return geo, nil
 		}
@@ -295,14 +358,16 @@ func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 			return nil, fmt.Errorf("failed to create reader for source %s: %w", filename, err)
 		}
 
-		geo, err := Open(reader, 256, 50)
+		// Share the VRT's tile cache, namespaced by resolved path, so the
+		// cache budget bounds tiles across all sources rather than per source.
+		geo, err := OpenWithCache(reader, v.tileCache, resolved+"#")
 		if err != nil {
 			return nil, fmt.Errorf("failed to open source GeoTIFF %s: %w", filename, err)
 		}
 		geo.Name = resolved
 
 		v.mu.Lock()
-		v.sourceReaders[filename] = geo
+		v.lruPut(filename, geo)
 		v.mu.Unlock()
 
 		return geo, nil

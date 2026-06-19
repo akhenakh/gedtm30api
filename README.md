@@ -41,7 +41,7 @@ VRT files allow you to combine multiple GeoTIFF files into a single virtual mosa
 gdalbuildvrt mosaic.vrt tile1.tiff tile2.tiff tile3.tiff
 ```
 
-When the server detects a `.vrt` extension, it parses the VRT XML to understand the overall raster layout and lazily opens the referenced source TIFFs as queries come in. Source TIFF readers are cached after first use and their tile caches operate independently for maximum efficiency.
+When the server detects a `.vrt` extension, it parses the VRT XML to understand the overall raster layout and lazily opens the referenced source TIFFs as queries come in. Open source readers are kept in an LRU bounded by `CACHE_MAX_OPEN_SOURCES`, and all sources share a single tile cache so that `CACHE_MAX_SIZE` bounds the *total* number of cached tiles across the whole mosaic (see [Cache Management](#cache-management)).
 
 The VRT file itself can be stored in cloud storage alongside its source TIFFs — `relativeToVRT` paths in the VRT are resolved automatically against the VRT's directory. Remote VRT files referencing `/vsicurl/` paths (GDAL virtual filesystem) are handled transparently.
 
@@ -94,8 +94,9 @@ gedtm30api
   Example File: BUCKET_URI="file:///path/to/dir", OBJECT_KEY="image.tif"
 - COG_SOURCE envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
   Use it for HTTP access. Can point to a `.tiff` or `.vrt` file.
-- CACHE_MAX_SIZE envDefault:"1024" number of tiles to keep in the cache
+- CACHE_MAX_SIZE envDefault:"1024" number of decoded tiles to keep in the cache. For a VRT this is the total budget shared across all source files.
 - CACHE_ITEMS_TO_PRUNE envDefault:"100" number of tiles to prune from the cache
+- CACHE_MAX_OPEN_SOURCES envDefault:"256" (VRT only) maximum number of source GeoTIFF handles kept open at once. Tile memory is bounded by `CACHE_MAX_SIZE`; this caps per-source metadata and libtiff handles/file descriptors. Ignored for a single COG.
 The server will start multiple services on different ports:
 -   **HTTP REST & Web UI**: `http://localhost:8080`
 -   **Prometheus Metrics**: `http://localhost:8888/metrics`
@@ -242,11 +243,22 @@ A simple web UI is available at `http://localhost:8080`. It allows you to intera
 
 ## Cache Management
 
-The server uses a cache to store recently accessed tiles. The cache size can be configured using the `CACHE_MAX_SIZE` environment variable. When the cache reaches its maximum size, the least recently used tiles are pruned to make room for new ones. The number of tiles to prune can be configured using the `CACHE_ITEMS_TO_PRUNE` environment variable.
+The server uses a cache to store recently accessed *decoded* tiles. The cache size can be configured using the `CACHE_MAX_SIZE` environment variable, which counts **tiles**, not bytes. When the cache reaches its maximum size, the least recently used tiles are pruned to make room for new ones. The number of tiles pruned per eviction is set by `CACHE_ITEMS_TO_PRUNE`.
 
-With 512 × 512 tiles, since a pixel is using 4 bytes (for a float32 or int32), 262,144 pixels × 4 bytes/pixel = 1,048,576 bytes.
+`CACHE_MAX_SIZE` is the total budget in both modes: a single COG holds up to that many of its own tiles, and a VRT shares one cache across all of its source files so the same limit bounds the whole mosaic.
 
-So 128 tiles would account for 128 MiB in memory.
+### Sizing memory
+
+With 512 × 512 tiles, a pixel uses 4 bytes (float32 or int32), so one tile is 262,144 pixels × 4 = 1,048,576 bytes (1 MiB).
+
+So the tile cache uses roughly `CACHE_MAX_SIZE × tile size`:
+
+- 128 tiles ≈ 128 MiB
+- 1024 tiles (default) ≈ 1 GiB
+
+For a VRT, add a small bounded overhead for open source handles: `CACHE_MAX_OPEN_SOURCES` × (per-file metadata + one libtiff handle/FD), on the order of tens of MiB at the default of 256. Evicted source handles are released by the Go garbage collector once no in-flight read still references them.
+
+When setting a container/Kubernetes memory limit, budget `CACHE_MAX_SIZE × tile size` plus a few hundred MiB of headroom for the Go runtime and heap fragmentation (e.g. request ~1.25 GiB / limit ~2 GiB with the defaults). Note the per-tile TTL means the resident set is a ceiling, not a constant.
 
 ## GeoTIFF library
 

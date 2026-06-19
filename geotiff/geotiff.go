@@ -10,6 +10,7 @@ import (
 	"log"
 	"log/slog"
 	"math"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -109,6 +110,13 @@ type GeoTIFF struct {
 	// sample formats (e.g. []float32, []int32).
 	tileCache *ccache.Cache[any]
 
+	// cacheKeyPrefix namespaces this file's tile keys within tileCache. It is
+	// empty for a standalone COG (which owns its cache) and set to a per-source
+	// identifier when several GeoTIFFs share one cache (the VRT case), so the
+	// cache's MaxSize bounds the total number of cached tiles across all
+	// sources rather than per source.
+	cacheKeyPrefix string
+
 	// inflightData uses a singleflight.Group to prevent "thundering herd" problems.
 	// It ensures that for a given tile, only one goroutine will perform the I/O
 	// and processing, while other concurrent requests for the same tile wait for
@@ -196,6 +204,16 @@ func (t Tag) String() string {
 // Open parses a GeoTIFF file from the provided io.ReadSeeker and returns a GeoTIFF struct
 // with all necessary metadata extracted for reading geographic raster data.
 func Open(r io.ReadSeeker, cacheSize int64, itemsToPrune uint32) (*GeoTIFF, error) {
+	cache := ccache.New(ccache.Configure[any]().MaxSize(cacheSize).ItemsToPrune(itemsToPrune))
+	return OpenWithCache(r, cache, "")
+}
+
+// OpenWithCache is like Open but uses a caller-provided tile cache. keyPrefix
+// namespaces this file's tiles within that (possibly shared) cache so multiple
+// GeoTIFFs can share a single cache without key collisions. A VRT uses this to
+// bound the total number of cached tiles across all of its source files with
+// one budget, keeping the same "MaxSize counts tiles" semantics as a single COG.
+func OpenWithCache(r io.ReadSeeker, cache *ccache.Cache[any], keyPrefix string) (*GeoTIFF, error) {
 	// Read and parse all TIFF tags from the file header
 	gTags, header, err := readTags(r)
 	if err != nil {
@@ -204,12 +222,12 @@ func Open(r io.ReadSeeker, cacheSize int64, itemsToPrune uint32) (*GeoTIFF, erro
 
 	// Initialize the GeoTIFF struct with basic file information
 	g := &GeoTIFF{
-		reader:    r,
-		tags:      gTags,
-		byteOrder: header.byteOrder,
-		isBigTIFF: header.isBigTIFF,
-		// Cache to hold processed slices.
-		tileCache: ccache.New(ccache.Configure[any]().MaxSize(cacheSize).ItemsToPrune(itemsToPrune)),
+		reader:         r,
+		tags:           gTags,
+		byteOrder:      header.byteOrder,
+		isBigTIFF:      header.isBigTIFF,
+		tileCache:      cache,
+		cacheKeyPrefix: keyPrefix,
 	}
 
 	// Extract required image dimensions
@@ -631,7 +649,8 @@ func (g *GeoTIFF) loc(x, y int) (float32, error) {
 // getTileData retrieves a tile, processes it into a typed slice, and caches the result.
 func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 	key := strconv.Itoa(tileNum)
-	item := g.tileCache.Get(key)
+	cacheKey := g.cacheKeyPrefix + key
+	item := g.tileCache.Get(cacheKey)
 	if item != nil && !item.Expired() {
 		return item.Value(), nil
 	}
@@ -694,7 +713,7 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 		}
 
 		// 3. Cache the final, processed, typed slice.
-		g.tileCache.Set(key, processedData, 10*time.Minute)
+		g.tileCache.Set(cacheKey, processedData, 10*time.Minute)
 		return processedData, nil
 	})
 
@@ -748,6 +767,11 @@ func (g *GeoTIFF) getLZWTileDataFromBytes(tileNum int) (any, error) {
 
 		g.remoteTIFF = tif
 		g.remoteHandleID = id
+		// Release the libtiff handle and reader registration when this GeoTIFF
+		// is garbage collected. A VRT may evict a source from its LRU while a
+		// read is still in flight; the finalizer only runs once no goroutine
+		// references the GeoTIFF, so it never closes a handle mid-decode.
+		runtime.SetFinalizer(g, (*GeoTIFF).finalizeRemote)
 	}
 	g.remoteTIFFMu.Unlock()
 
@@ -785,13 +809,26 @@ func (g *GeoTIFF) getLZWTileDataFromBytes(tileNum int) (any, error) {
 	return g.processDecompressedTile(tileNum, raw)
 }
 
+// finalizeRemote closes the libtiff handle and unregisters its reader. It is
+// installed as a GC finalizer so an evicted source's resources are reclaimed
+// without risking a close while another goroutine is still decoding a tile.
+func (g *GeoTIFF) finalizeRemote() {
+	g.remoteTIFFMu.Lock()
+	defer g.remoteTIFFMu.Unlock()
+	if g.remoteTIFF != nil {
+		closeRemoteTIFF(g.remoteTIFF)
+		unregisterRemoteReader(g.remoteHandleID)
+		g.remoteTIFF = nil
+	}
+}
+
 func (g *GeoTIFF) processDecompressedTile(tileNum int, raw []byte) (any, error) {
 	numPixels := len(raw) / 4
 	tileData := make([]float32, numPixels)
 	if err := binary.Read(bytes.NewReader(raw), g.byteOrder, &tileData); err != nil {
 		return nil, err
 	}
-	g.tileCache.Set(strconv.Itoa(tileNum), tileData, 10*time.Minute)
+	g.tileCache.Set(g.cacheKeyPrefix+strconv.Itoa(tileNum), tileData, 10*time.Minute)
 	return tileData, nil
 }
 

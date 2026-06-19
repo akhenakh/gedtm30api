@@ -319,7 +319,7 @@ func openTestVRT(t *testing.T) GeoRaster {
 		return os.Open("testdata/" + filename)
 	}
 
-	geo, err := OpenVRT(f, factory, 5, 1)
+	geo, err := OpenVRT(f, factory, 5, 1, 0)
 	if err != nil {
 		t.Fatalf("failed to open VRT: %v", err)
 	}
