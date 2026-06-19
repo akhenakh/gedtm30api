@@ -89,7 +89,6 @@ func goRemoteRead(id C.uintptr_t, buf unsafe.Pointer, size C.int64_t, offset C.i
 	if e.buf != nil && off >= e.base && off+int64(n) <= e.base+int64(len(e.buf)) {
 		start := int(off - e.base)
 		copy(dst, e.buf[start:start+n])
-		slog.Debug("goRemoteRead buffer hit", "offset", off, "size", n)
 		return C.int64_t(n)
 	}
 

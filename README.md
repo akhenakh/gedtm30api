@@ -98,7 +98,8 @@ gedtm30api
 - CACHE_ITEMS_TO_PRUNE envDefault:"100" number of tiles to prune from the cache
 - CACHE_MAX_OPEN_SOURCES envDefault:"256" (VRT only) maximum number of source GeoTIFF handles kept open at once. Tile memory is bounded by `CACHE_MAX_SIZE`; this caps per-source metadata and libtiff handles/file descriptors. Ignored for a single COG.
 - PREFETCH_NEIGHBORS envDefault:"false" when true, each query fetches the 8 tiles surrounding the requested tile in the background. This lowers latency for spatially coherent workloads (e.g. elevation profiles) but multiplies I/O per request, so leave it off for sparse single-point lookups.
-- TILE_FETCH_CONCURRENCY envDefault:"4" number of concurrent HTTP range requests used to download a single tile (and the file header). A single TCP stream to object storage rarely saturates a high-latency link, so fetching one ~800 KB tile as several parallel ranges aggregates throughput. Set to 1 to disable. Tiles are fetched whole because LZW cannot be partially decoded.
+- TILE_FETCH_CONCURRENCY envDefault:"4" number of concurrent HTTP range requests used to download a single tile (and the file header). A single TCP stream to object storage rarely saturates a high-latency link, so fetching one ~800 KB tile as several parallel ranges aggregates throughput. Set to 1 to disable. Tiles are fetched whole because LZW cannot be partially decoded. Note: this only helps when per-connection throughput (not total link bandwidth) is the bottleneck; on a saturated WAN link it has no effect.
+- HEADER_PREFETCH_SIZE envDefault:"65536" bytes fetched in a single read when opening a source, so the tag parser and libtiff read the header from memory instead of one network request per tag. Must cover the file's IFD; if open logs show `prefix_misses > 0`, raise it.
 The server will start multiple services on different ports:
 -   **HTTP REST & Web UI**: `http://localhost:8080`
 -   **Prometheus Metrics**: `http://localhost:8888/metrics`

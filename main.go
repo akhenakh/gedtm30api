@@ -87,6 +87,10 @@ type Config struct {
 	// download one tile/header. Higher values aggregate more throughput over
 	// high-latency links (WAN/object storage). 1 disables parallelism.
 	TileFetchConcurrency int `env:"TILE_FETCH_CONCURRENCY" envDefault:"4"`
+	// HeaderPrefetchSize is how many header bytes are fetched in one read when a
+	// source is opened. Must cover the IFD; raise it if open logs show
+	// prefix_misses > 0.
+	HeaderPrefetchSize int64 `env:"HEADER_PREFETCH_SIZE" envDefault:"65536"`
 }
 
 type Server struct {
@@ -108,6 +112,7 @@ func main() {
 	logger.Debug("config:", "config", cfg)
 
 	geotiff.SetTileFetchConcurrency(cfg.TileFetchConcurrency)
+	geotiff.SetHeaderPrefetchSize(cfg.HeaderPrefetchSize)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -12,7 +12,22 @@ import (
 // TileByteCounts arrays live near the front, so this lets both the Go tag
 // parser and libtiff's TIFFClientOpen read the entire header from memory
 // instead of issuing one network range request per tag.
-const headerPrefetchSize int64 = 512 * 1024
+//
+// The default (64 KiB) comfortably covers typical COG headers; if a file's IFD
+// is larger, readTags transparently falls back to extra network reads (visible
+// as a non-zero prefix_misses in the open log) and the value can be raised via
+// SetHeaderPrefetchSize.
+var headerPrefetchSize atomic.Int64
+
+func init() { headerPrefetchSize.Store(64 * 1024) }
+
+// SetHeaderPrefetchSize sets how many header bytes are prefetched on open.
+// Values < 1 leave the current setting unchanged.
+func SetHeaderPrefetchSize(n int64) {
+	if n >= 1 {
+		headerPrefetchSize.Store(n)
+	}
+}
 
 // prefixReader wraps a reader and serves reads that fall within a pre-fetched
 // header block from memory, delegating everything else (tile data) to the
@@ -51,7 +66,7 @@ func newPrefixReader(r io.ReadSeeker) (*prefixReader, error) {
 		return nil, err
 	}
 
-	n := headerPrefetchSize
+	n := headerPrefetchSize.Load()
 	if size < n {
 		n = size
 	}
@@ -80,9 +95,6 @@ func (p *prefixReader) ReadAt(b []byte, off int64) (int, error) {
 
 // PrefixLen returns the number of bytes prefetched from the start of the file.
 func (p *prefixReader) PrefixLen() int { return len(p.prefix) }
-
-// Size returns the total file size.
-func (p *prefixReader) Size() int64 { return p.size }
 
 // Fallbacks returns how many reads missed the prefetched prefix and hit the
 // underlying reader (i.e. caused a network round-trip).

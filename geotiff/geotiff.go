@@ -223,25 +223,23 @@ func OpenWithCache(r io.ReadSeeker, cache *ccache.Cache[any], keyPrefix string) 
 	// remote open) read it from memory instead of issuing a network round-trip
 	// per tag. Falls back to the raw reader if it cannot be wrapped.
 	var pr *prefixReader
-	prefixStart := time.Now()
 	if p, err := newPrefixReader(r); err == nil {
 		pr = p
 		r = pr
-		slog.Debug("header prefetch read", "prefix", pr.PrefixLen(), "size", pr.Size(), "dur", time.Since(prefixStart))
 	} else {
 		slog.Debug("header prefetch disabled, using raw reader", "error", err)
 	}
 
 	// Read and parse all TIFF tags from the file header
-	parseStart := time.Now()
 	gTags, header, err := readTags(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read tiff tags: %w", err)
 	}
-	if pr != nil {
-		// fallbacks > 0 means the prefix did not cover the whole header and
-		// readTags had to make network round-trips for some tag values.
-		slog.Debug("readTags parse", "dur", time.Since(parseStart), "prefix_misses", pr.Fallbacks())
+	if pr != nil && pr.Fallbacks() > 0 {
+		// The header prefix did not cover the whole IFD, so readTags made extra
+		// network round-trips. Raising HEADER_PREFETCH_SIZE avoids this.
+		slog.Warn("header prefetch too small for IFD, made extra network reads",
+			"file", keyPrefix, "prefix", pr.PrefixLen(), "misses", pr.Fallbacks())
 	}
 
 	// Initialize the GeoTIFF struct with basic file information
@@ -814,16 +812,13 @@ func (g *GeoTIFF) getLZWTileDataFromBytes(tileNum int) (any, error) {
 	if tileNum >= 0 && tileNum < len(g.tileOffsets) && tileNum < len(g.tileByteCounts) {
 		offset := int64(g.tileOffsets[tileNum])
 		buf := make([]byte, g.tileByteCounts[tileNum])
-		fetchStart := time.Now()
 		if n, err := parallelReadAt(readerAt, buf, offset); err == nil && n == len(buf) {
 			prefetch = buf
 			prefetchBase = offset
 		}
-		slog.Debug("LZW tile prefetch read", "file", g.Name, "tile", tileNum, "bytes", len(buf), "dur", time.Since(fetchStart))
 	}
 
 	slog.Debug("libtiff LZW decode from remote", "file", g.Name, "tile", tileNum)
-	decodeStart := time.Now()
 	g.readTIFFMu.Lock()
 	if prefetch != nil {
 		setRemoteBuffer(id, prefetch, prefetchBase)
@@ -836,12 +831,7 @@ func (g *GeoTIFF) getLZWTileDataFromBytes(tileNum int) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("libtiff remote decode tile %d: %w", tileNum, err)
 	}
-	slog.Debug("LZW tile libtiff decode", "file", g.Name, "tile", tileNum, "dur", time.Since(decodeStart))
-
-	processStart := time.Now()
-	result, perr := g.processDecompressedTile(tileNum, raw)
-	slog.Debug("LZW tile process", "file", g.Name, "tile", tileNum, "dur", time.Since(processStart))
-	return result, perr
+	return g.processDecompressedTile(tileNum, raw)
 }
 
 // SetPrefetchEnabled toggles background neighbor prefetching for this file.
