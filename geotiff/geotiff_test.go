@@ -523,11 +523,14 @@ func TestLZWRemote(t *testing.T) {
 	}
 
 	reader := bytes.NewReader(data)
-	tif, err := openRemoteTIFF(reader, int64(len(data)))
+	tif, id, err := openRemoteTIFF(reader, int64(len(data)))
 	if err != nil {
 		t.Fatalf("openRemoteTIFF failed: %v", err)
 	}
-	defer closeRemoteTIFF(tif)
+	defer func() {
+		closeRemoteTIFF(tif)
+		unregisterRemoteReader(id)
+	}()
 
 	raw, err := readTileFromHandle(tif, 0)
 	if err != nil {

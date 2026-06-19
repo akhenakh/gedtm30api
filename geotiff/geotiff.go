@@ -129,6 +129,9 @@ type GeoTIFF struct {
 	// is garbage collected. nil when not used.
 	remoteTIFF   unsafe.Pointer
 	remoteTIFFMu sync.Mutex
+	// remoteHandleID is the registry id routing libtiff I/O to this GeoTIFF's
+	// reader (and to its pre-fetched tile buffer during decode).
+	remoteHandleID uintptr
 	// readTIFFMu serializes TIFFReadEncodedTile calls on the remote handle.
 	readTIFFMu sync.Mutex
 }
@@ -724,30 +727,57 @@ func (g *GeoTIFF) getLZWTileDataFromBytes(tileNum int) (any, error) {
 		return nil, errors.New("reader does not support ReadAt for LZW decoding")
 	}
 
+	// Lazily open (and cache) the libtiff handle for this source. The handle
+	// owns the parsed IFD; subsequent tile reads only fetch the tile's bytes.
 	g.remoteTIFFMu.Lock()
 	tif := g.remoteTIFF
-	g.remoteTIFFMu.Unlock()
-
+	id := g.remoteHandleID
 	if tif == nil {
 		size, err := g.reader.Seek(0, io.SeekEnd)
 		if err != nil {
+			g.remoteTIFFMu.Unlock()
 			return nil, fmt.Errorf("failed to get file size for LZW: %w", err)
 		}
 
 		slog.Debug("libtiff opening remote TIFF", "file", g.Name)
-		tif, err = openRemoteTIFF(readerAt, size)
+		tif, id, err = openRemoteTIFF(readerAt, size)
 		if err != nil {
+			g.remoteTIFFMu.Unlock()
 			return nil, fmt.Errorf("libtiff open remote: %w", err)
 		}
 
-		g.remoteTIFFMu.Lock()
 		g.remoteTIFF = tif
-		g.remoteTIFFMu.Unlock()
+		g.remoteHandleID = id
+	}
+	g.remoteTIFFMu.Unlock()
+
+	// Pre-fetch the exact compressed tile bytes with a single ReadAt. This
+	// happens *outside* readTIFFMu, so concurrent tile fetches (notably the
+	// neighbor prefetch) issue their network requests in parallel instead of
+	// serializing behind the decode lock. libtiff then decodes straight from
+	// this buffer (see goRemoteRead), so no network I/O occurs while the lock
+	// is held. A failed/short prefetch simply falls back to libtiff's own
+	// reads, so correctness does not depend on it.
+	var prefetch []byte
+	var prefetchBase int64
+	if tileNum >= 0 && tileNum < len(g.tileOffsets) && tileNum < len(g.tileByteCounts) {
+		offset := int64(g.tileOffsets[tileNum])
+		buf := make([]byte, g.tileByteCounts[tileNum])
+		if n, err := readerAt.ReadAt(buf, offset); err == nil && n == len(buf) {
+			prefetch = buf
+			prefetchBase = offset
+		}
 	}
 
 	slog.Debug("libtiff LZW decode from remote", "file", g.Name, "tile", tileNum)
 	g.readTIFFMu.Lock()
+	if prefetch != nil {
+		setRemoteBuffer(id, prefetch, prefetchBase)
+	}
 	raw, err := readTileFromHandle(tif, tileNum)
+	if prefetch != nil {
+		clearRemoteBuffer(id)
+	}
 	g.readTIFFMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("libtiff remote decode tile %d: %w", tileNum, err)

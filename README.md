@@ -196,8 +196,10 @@ Retrieves the elevation for a single coordinate.
 
 -   **Example with `grpcurl`**:
     ```sh
-    grpcurl -plaintext -d '{"latitude": 45.8329, "longitude": 6.8648}' \
-      localhost:9200 elevationapi.ElevationService.GetElevation
+    grpcurl -plaintext -d '{
+      "latitude": 38.84019,
+      "longitude": -79.605892
+    }' localhost:9200 elevationapi.v1.ElevationService.GetElevation
     ```
 
 ##### `GetProfile` RPC

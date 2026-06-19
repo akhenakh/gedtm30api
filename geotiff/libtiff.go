@@ -3,16 +3,17 @@ package geotiff
 /*
 #cgo LDFLAGS: -ltiff
 #include <tiffio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-extern int64_t goRemoteRead(void* buf, int64_t size, int64_t offset);
+extern int64_t goRemoteRead(uintptr_t id, void* buf, int64_t size, int64_t offset);
 
-typedef struct { int64_t size; int64_t pos; } RHandle;
+typedef struct { int64_t size; int64_t pos; uintptr_t id; } RHandle;
 
 static tmsize_t rhRead(thandle_t h, void* buf, tmsize_t size) {
 	RHandle* rh = (RHandle*)h;
-	int64_t n = goRemoteRead(buf, size, rh->pos);
+	int64_t n = goRemoteRead(rh->id, buf, size, rh->pos);
 	if (n <= 0) { memset(buf, 0, size); return 0; }
 	rh->pos += n;
 	return (tmsize_t)n;
@@ -30,12 +31,14 @@ static toff_t rhSize(thandle_t h) { return ((RHandle*)h)->size; }
 static int rhMap(thandle_t h, void** pbase, toff_t* psize) { return 0; }
 static void rhUnmap(thandle_t h, void* base, toff_t size) {}
 
-// Open a remote TIFF backed by goRemoteRead callbacks.
-TIFF* gtl_OpenRemote(int64_t fileSize) {
+// Open a remote TIFF backed by goRemoteRead callbacks. id identifies which Go
+// reader serves this handle's I/O.
+TIFF* gtl_OpenRemote(int64_t fileSize, uintptr_t id) {
 	RHandle* rh = (RHandle*)malloc(sizeof(RHandle));
 	if (!rh) return NULL;
 	rh->size = fileSize;
 	rh->pos = 0;
+	rh->id = id;
 	return TIFFClientOpen("remote", "r", (thandle_t)rh,
 		rhRead, rhWrite, rhSeek, rhClose, rhSize, rhMap, rhUnmap);
 }
@@ -95,19 +98,17 @@ func libtiffDecodeTile(path string, tileNum int) ([]byte, error) {
 	return copyDecompressedData(outData, outSize), nil
 }
 
-func openRemoteTIFF(reader io.ReaderAt, fileSize int64) (unsafe.Pointer, error) {
-	remoteReaderMu.Lock()
-	remoteReader = reader
-	remoteReaderMu.Unlock()
+// openRemoteTIFF opens a libtiff handle whose reads are served by the given
+// reader. It returns the handle and the registry id used to route I/O for it.
+func openRemoteTIFF(reader io.ReaderAt, fileSize int64) (unsafe.Pointer, uintptr, error) {
+	id := registerRemoteReader(reader)
 
-	tif := C.gtl_OpenRemote(C.int64_t(fileSize))
+	tif := C.gtl_OpenRemote(C.int64_t(fileSize), C.uintptr_t(id))
 	if tif == nil {
-		remoteReaderMu.Lock()
-		remoteReader = nil
-		remoteReaderMu.Unlock()
-		return nil, fmt.Errorf("gtl_OpenRemote failed")
+		unregisterRemoteReader(id)
+		return nil, 0, fmt.Errorf("gtl_OpenRemote failed")
 	}
-	return unsafe.Pointer(tif), nil
+	return unsafe.Pointer(tif), id, nil
 }
 
 func readTileFromHandle(tif unsafe.Pointer, tileNum int) ([]byte, error) {
