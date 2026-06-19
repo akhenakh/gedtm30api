@@ -123,6 +123,11 @@ type GeoTIFF struct {
 	// the result.
 	inflightData singleflight.Group
 
+	// prefetchEnabled controls whether a successful tile read also fetches its
+	// 8 neighbors in the background. Helpful for profiles (spatially coherent
+	// queries), wasteful for sparse single-point lookups, so it defaults off.
+	prefetchEnabled bool
+
 	// inflightPrefetch uses a separate singleflight.Group to ensure that the prefetching
 	// logic for a given tile's neighbors is only triggered once, avoiding redundant
 	// prefetch operations initiated by concurrent requests.
@@ -214,6 +219,15 @@ func Open(r io.ReadSeeker, cacheSize int64, itemsToPrune uint32) (*GeoTIFF, erro
 // bound the total number of cached tiles across all of its source files with
 // one budget, keeping the same "MaxSize counts tiles" semantics as a single COG.
 func OpenWithCache(r io.ReadSeeker, cache *ccache.Cache[any], keyPrefix string) (*GeoTIFF, error) {
+	// Fetch the header region once so the tag parser (and later libtiff's
+	// remote open) read it from memory instead of issuing a network round-trip
+	// per tag. Falls back to the raw reader if it cannot be wrapped.
+	if pr, err := newPrefixReader(r); err == nil {
+		r = pr
+	} else {
+		slog.Debug("header prefetch disabled, using raw reader", "error", err)
+	}
+
 	// Read and parse all TIFF tags from the file header
 	gTags, header, err := readTags(r)
 	if err != nil {
@@ -604,20 +618,23 @@ func (g *GeoTIFF) loc(x, y int) (float32, error) {
 		return 0, fmt.Errorf("failed to get data for tile %d: %w", tileNum, err)
 	}
 
-	// After successfully getting the primary tile, trigger a non-blocking
-	// prefetch for its neighbors. This improves performance for subsequent
-	// requests that are spatially close.
-	prefetchKey := fmt.Sprintf("prefetch-%d", tileNum)
-	go g.inflightPrefetch.Do(prefetchKey, func() (interface{}, error) {
-		g.prefetchNeighbors(tileNum)
-		// We add a short "Forget" duration. This allows another
-		// prefetch to be triggered for the same tile after a while,
-		// which can be useful if cache items expire.
-		time.AfterFunc(1*time.Minute, func() {
-			g.inflightPrefetch.Forget(prefetchKey)
+	// After successfully getting the primary tile, optionally trigger a
+	// non-blocking prefetch for its neighbors. This improves latency for
+	// subsequent spatially-close requests (e.g. profiles) at the cost of extra
+	// I/O per query, so it is gated behind prefetchEnabled.
+	if g.prefetchEnabled {
+		prefetchKey := fmt.Sprintf("prefetch-%d", tileNum)
+		go g.inflightPrefetch.Do(prefetchKey, func() (interface{}, error) {
+			g.prefetchNeighbors(tileNum)
+			// We add a short "Forget" duration. This allows another
+			// prefetch to be triggered for the same tile after a while,
+			// which can be useful if cache items expire.
+			time.AfterFunc(1*time.Minute, func() {
+				g.inflightPrefetch.Forget(prefetchKey)
+			})
+			return nil, nil
 		})
-		return nil, nil
-	})
+	}
 
 	// Calculate the pixel's linear index within its tile
 	idI := x % int(g.tileWidth)
@@ -807,6 +824,11 @@ func (g *GeoTIFF) getLZWTileDataFromBytes(tileNum int) (any, error) {
 		return nil, fmt.Errorf("libtiff remote decode tile %d: %w", tileNum, err)
 	}
 	return g.processDecompressedTile(tileNum, raw)
+}
+
+// SetPrefetchEnabled toggles background neighbor prefetching for this file.
+func (g *GeoTIFF) SetPrefetchEnabled(enabled bool) {
+	g.prefetchEnabled = enabled
 }
 
 // finalizeRemote closes the libtiff handle and unregisters its reader. It is

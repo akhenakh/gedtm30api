@@ -16,7 +16,7 @@ It also supports [USGS 3DEP 1/3 arc-second (~10m)](https://prd-tnm.s3.amazonaws.
 -   **LZW Compression Support**: Handles LZW-compressed TIFF tiles (common in USGS 3DEP data) via CGo/libgeotiff integration. Both local and remote LZW tiles are decoded using libtiff's proven decoder with predictor support.
 -   **High-Performance Caching**: Utilizes an in-memory LRU cache (`ccache`) to store *processed* tile data. This dramatically reduces I/O and CPU load for subsequent requests to nearby geographic areas.
 -   **Concurrent Request Handling**: Implements a `singleflight` mechanism to prevent the "thundering herd" problem, ensuring that concurrent requests for the same uncached tile result in only one fetch operation.
--   **Intelligent Prefetching**: When a tile is requested, its neighbors are preemptively and concurrently fetched in the background to improve latency for spatially coherent queries (like generating a profile).
+-   **Intelligent Prefetching** (opt-in): When enabled via `PREFETCH_NEIGHBORS`, a requested tile's neighbors are preemptively fetched in the background to improve latency for spatially coherent queries (like generating a profile). Off by default to avoid wasted I/O on sparse point lookups.
 -   **Production-Ready Structure**: Includes separate servers for the API, health checks (`gRPC`), and metrics (`Prometheus`), all managed with graceful shutdown.
 
 ## Getting Started
@@ -97,6 +97,7 @@ gedtm30api
 - CACHE_MAX_SIZE envDefault:"1024" number of decoded tiles to keep in the cache. For a VRT this is the total budget shared across all source files.
 - CACHE_ITEMS_TO_PRUNE envDefault:"100" number of tiles to prune from the cache
 - CACHE_MAX_OPEN_SOURCES envDefault:"256" (VRT only) maximum number of source GeoTIFF handles kept open at once. Tile memory is bounded by `CACHE_MAX_SIZE`; this caps per-source metadata and libtiff handles/file descriptors. Ignored for a single COG.
+- PREFETCH_NEIGHBORS envDefault:"false" when true, each query fetches the 8 tiles surrounding the requested tile in the background. This lowers latency for spatially coherent workloads (e.g. elevation profiles) but multiplies I/O per request, so leave it off for sparse single-point lookups.
 The server will start multiple services on different ports:
 -   **HTTP REST & Web UI**: `http://localhost:8080`
 -   **Prometheus Metrics**: `http://localhost:8888/metrics`

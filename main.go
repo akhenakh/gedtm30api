@@ -80,6 +80,9 @@ type Config struct {
 	// once. Tile memory is bounded by CacheMaxSize; this bounds metadata and
 	// libtiff handles/FDs. Ignored for a single COG.
 	CacheMaxOpenSources int `env:"CACHE_MAX_OPEN_SOURCES" envDefault:"256"`
+	// PrefetchNeighbors fetches the 8 tiles surrounding each queried tile in
+	// the background. Useful for profiles, wasteful for sparse point lookups.
+	PrefetchNeighbors bool `env:"PREFETCH_NEIGHBORS" envDefault:"false"`
 }
 
 type Server struct {
@@ -391,8 +394,13 @@ func setupTIFFReader(ctx context.Context, cfg Config, logger *slog.Logger) (geot
 		}
 	}
 
-	logger.Info("configuring tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
-	return geotiff.Open(reader, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
+	logger.Info("configuring tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune, "prefetch_neighbors", cfg.PrefetchNeighbors)
+	geo, err := geotiff.Open(reader, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
+	if err != nil {
+		return nil, err
+	}
+	geo.SetPrefetchEnabled(cfg.PrefetchNeighbors)
+	return geo, nil
 }
 
 func setupBlobVRTReader(ctx context.Context, bucket *blob.Bucket, cfg Config, logger *slog.Logger) (geotiff.GeoRaster, error) {
@@ -418,6 +426,7 @@ func setupBlobVRTReader(ctx context.Context, bucket *blob.Bucket, cfg Config, lo
 		return nil, err
 	}
 	vrt.SetBaseURL(cfg.ObjectKey)
+	vrt.SetPrefetchEnabled(cfg.PrefetchNeighbors)
 	return vrt, nil
 }
 
@@ -437,6 +446,7 @@ func setupHTTPVRTReader(ctx context.Context, cfg Config, logger *slog.Logger) (g
 		return nil, err
 	}
 	vrt.SetBaseURL(cfg.CogSource)
+	vrt.SetPrefetchEnabled(cfg.PrefetchNeighbors)
 	return vrt, nil
 }
 
@@ -456,6 +466,7 @@ func setupLocalVRTReader(ctx context.Context, cfg Config, logger *slog.Logger) (
 		return nil, err
 	}
 	vrt.SetBaseURL(cfg.CogSource)
+	vrt.SetPrefetchEnabled(cfg.PrefetchNeighbors)
 	return vrt, nil
 }
 

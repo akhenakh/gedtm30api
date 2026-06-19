@@ -105,6 +105,9 @@ type VRTGeo struct {
 	sources     []VRTSourceInfo
 	vrtBaseURL  string
 
+	// prefetchEnabled is propagated to each source GeoTIFF as it is opened.
+	prefetchEnabled bool
+
 	readerFactory ReaderFactory
 
 	// tileCache is shared by every source GeoTIFF so MaxSize bounds the total
@@ -321,6 +324,12 @@ func (v *VRTGeo) SetBaseURL(baseURL string) {
 	v.vrtBaseURL = baseURL
 }
 
+// SetPrefetchEnabled toggles background neighbor prefetching for sources opened
+// after this call. Call it before serving queries.
+func (v *VRTGeo) SetPrefetchEnabled(enabled bool) {
+	v.prefetchEnabled = enabled
+}
+
 func (v *VRTGeo) findSourceByFilename(filename string) *VRTSourceInfo {
 	for i := range v.sources {
 		if v.sources[i].Filename == filename {
@@ -365,6 +374,7 @@ func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 			return nil, fmt.Errorf("failed to open source GeoTIFF %s: %w", filename, err)
 		}
 		geo.Name = resolved
+		geo.SetPrefetchEnabled(v.prefetchEnabled)
 
 		v.mu.Lock()
 		v.lruPut(filename, geo)
