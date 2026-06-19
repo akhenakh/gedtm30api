@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // headerPrefetchSize is how many bytes from the start of a file are fetched in
@@ -27,6 +28,8 @@ type prefixReader struct {
 
 	mu  sync.Mutex
 	off int64
+
+	fallbacks int64 // atomic: reads that missed the prefix
 }
 
 // fileNamerAt is implemented by readers (e.g. *os.File) that can report a path;
@@ -55,7 +58,7 @@ func newPrefixReader(r io.ReadSeeker) (*prefixReader, error) {
 
 	prefix := make([]byte, n)
 	if n > 0 {
-		read, err := ra.ReadAt(prefix, 0)
+		read, err := parallelReadAt(ra, prefix, 0)
 		if err != nil && err != io.EOF {
 			return nil, err
 		}
@@ -69,8 +72,21 @@ func (p *prefixReader) ReadAt(b []byte, off int64) (int, error) {
 	if off >= 0 && off+int64(len(b)) <= int64(len(p.prefix)) {
 		return copy(b, p.prefix[off:off+int64(len(b))]), nil
 	}
+	// A read outside the prefetched prefix means a network round-trip; counting
+	// these reveals whether the prefix is too small to cover the header/IFD.
+	atomic.AddInt64(&p.fallbacks, 1)
 	return p.inner.ReadAt(b, off)
 }
+
+// PrefixLen returns the number of bytes prefetched from the start of the file.
+func (p *prefixReader) PrefixLen() int { return len(p.prefix) }
+
+// Size returns the total file size.
+func (p *prefixReader) Size() int64 { return p.size }
+
+// Fallbacks returns how many reads missed the prefetched prefix and hit the
+// underlying reader (i.e. caused a network round-trip).
+func (p *prefixReader) Fallbacks() int64 { return atomic.LoadInt64(&p.fallbacks) }
 
 func (p *prefixReader) Read(b []byte) (int, error) {
 	p.mu.Lock()

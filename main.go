@@ -83,6 +83,10 @@ type Config struct {
 	// PrefetchNeighbors fetches the 8 tiles surrounding each queried tile in
 	// the background. Useful for profiles, wasteful for sparse point lookups.
 	PrefetchNeighbors bool `env:"PREFETCH_NEIGHBORS" envDefault:"false"`
+	// TileFetchConcurrency is the number of concurrent range requests used to
+	// download one tile/header. Higher values aggregate more throughput over
+	// high-latency links (WAN/object storage). 1 disables parallelism.
+	TileFetchConcurrency int `env:"TILE_FETCH_CONCURRENCY" envDefault:"4"`
 }
 
 type Server struct {
@@ -102,6 +106,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	logger.Debug("config:", "config", cfg)
+
+	geotiff.SetTileFetchConcurrency(cfg.TileFetchConcurrency)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
