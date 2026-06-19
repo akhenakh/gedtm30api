@@ -89,6 +89,7 @@ func goRemoteRead(id C.uintptr_t, buf unsafe.Pointer, size C.int64_t, offset C.i
 	if e.buf != nil && off >= e.base && off+int64(n) <= e.base+int64(len(e.buf)) {
 		start := int(off - e.base)
 		copy(dst, e.buf[start:start+n])
+		slog.Debug("goRemoteRead buffer hit", "offset", off, "size", n)
 		return C.int64_t(n)
 	}
 
@@ -98,6 +99,8 @@ func goRemoteRead(id C.uintptr_t, buf unsafe.Pointer, size C.int64_t, offset C.i
 	if e.buf != nil {
 		slog.Debug("goRemoteRead buffer MISS (network read under decode lock)",
 			"offset", off, "size", n, "bufBase", e.base, "bufLen", len(e.buf))
+	} else {
+		slog.Debug("goRemoteRead reader read (no tile buffer set)", "offset", off, "size", n)
 	}
 
 	// Fallback: read directly from the source (e.g. header/IFD access, or a

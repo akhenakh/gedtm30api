@@ -516,6 +516,29 @@ func TestLZWCog(t *testing.T) {
 	}
 }
 
+// BenchmarkLZWDecodeTile measures the libtiff open + LZW decode of one tile
+// entirely from an in-memory buffer (no network), to compare raw CPU cost
+// across machines. Run on each host and compare ns/op:
+//
+//	go test -bench BenchmarkLZWDecodeTile -run '^$' -benchtime 50x ./geotiff/
+func BenchmarkLZWDecodeTile(b *testing.B) {
+	data, err := os.ReadFile("testdata/lzw-cog.tiff")
+	if err != nil {
+		b.Skipf("missing test data: %v", err)
+	}
+	for i := 0; i < b.N; i++ {
+		tif, id, err := openRemoteTIFF(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := readTileFromHandle(tif, 0); err != nil {
+			b.Fatal(err)
+		}
+		closeRemoteTIFF(tif)
+		unregisterRemoteReader(id)
+	}
+}
+
 func TestLZWRemote(t *testing.T) {
 	data, err := os.ReadFile("testdata/lzw-cog.tiff")
 	if err != nil {
