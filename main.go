@@ -228,7 +228,15 @@ func startGRPCAPIServer(logger *slog.Logger, cfg Config, healthServer *health.Se
 		return fmt.Errorf("gRPC API server failed to listen: %w", err)
 	}
 
-	lopts := []logging.Option{logging.WithLogOnEvents(logging.StartCall, logging.FinishCall)}
+	lopts := []logging.Option{
+		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
+		logging.WithLevels(func(c codes.Code) logging.Level {
+			if c == codes.OK {
+				return logging.LevelDebug
+			}
+			return logging.DefaultServerCodeToLevel(c)
+		}),
+	}
 	grpcAPIServer = grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			logging.UnaryServerInterceptor(
