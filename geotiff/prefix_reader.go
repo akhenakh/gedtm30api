@@ -30,21 +30,62 @@ func SetHeaderPrefetchSize(n int64) {
 }
 
 // prefixReader wraps a reader and serves reads that fall within a pre-fetched
-// header block from memory, delegating everything else (tile data) to the
-// underlying reader. It implements io.ReadSeeker and io.ReaderAt.
+// header block (or one of the additional extents added via addExtent) from
+// memory, delegating everything else (tile data) to the underlying reader.
+// It implements io.ReadSeeker and io.ReaderAt.
 //
-// The prefix is immutable after construction, so ReadAt is lock-free; only the
-// sequential Read/Seek offset is mutex-protected (it is used single-threaded
-// during parsing).
+// The prefix and extents are populated during GeoTIFF/VRT source setup
+// (OpenWithCache and its callees), before any concurrent tile read can
+// start, so ReadAt can read them lock-free; only the sequential Read/Seek
+// offset is mutex-protected (it is used single-threaded during parsing).
 type prefixReader struct {
 	inner  io.ReaderAt
 	prefix []byte
 	size   int64
 
+	// extra holds additional byte ranges fetched after the initial prefix --
+	// e.g. IFD tag values (TileOffsets/TileByteCounts and similar) that
+	// readTags found outside the header prefix and batch-fetched in one
+	// round trip via prefetchMissingRanges, instead of one network read per
+	// missed tag. Populated once before concurrent reads begin (see above),
+	// so no locking is needed to read it.
+	extra []prefixExtent
+
 	mu  sync.Mutex
 	off int64
 
-	fallbacks int64 // atomic: reads that missed the prefix
+	fallbacks int64 // atomic: reads that missed the prefix and all extents
+}
+
+// prefixExtent is one additional cached byte range beyond the initial
+// prefix.
+type prefixExtent struct {
+	off  int64
+	data []byte
+}
+
+// addExtent records an additional byte range as servable from memory. Not
+// safe for concurrent use with itself or with ReadAt; callers must only use
+// it during single-threaded source setup (see prefixReader doc comment).
+func (p *prefixReader) addExtent(off int64, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	p.extra = append(p.extra, prefixExtent{off: off, data: data})
+}
+
+// covers reports whether [start, end) is already fully served from memory
+// (the initial prefix or a previously added extent).
+func (p *prefixReader) covers(start, end int64) bool {
+	if start >= 0 && end <= int64(len(p.prefix)) {
+		return true
+	}
+	for _, e := range p.extra {
+		if start >= e.off && end <= e.off+int64(len(e.data)) {
+			return true
+		}
+	}
+	return false
 }
 
 // fileNamerAt is implemented by readers (e.g. *os.File) that can report a path;
@@ -61,23 +102,29 @@ func newPrefixReader(r io.ReadSeeker) (*prefixReader, error) {
 		return nil, errors.New("reader does not support ReadAt")
 	}
 
+	// Issue the header prefetch *before* asking for the file size. For a
+	// reader that only learns its size from a read (BlobReader), this lets
+	// the very first range read double as size discovery, instead of
+	// requiring a separate size lookup (an S3 HeadObject) before any data is
+	// read at all. Readers that already know their size for free (a local
+	// file, an HTTP HEAD done at construction) are unaffected either way.
+	n := headerPrefetchSize.Load()
+	var prefix []byte
+	if n > 0 {
+		buf := make([]byte, n)
+		read, err := parallelReadAt(ra, buf, 0)
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		prefix = buf[:read]
+	}
+
 	size, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, err
 	}
-
-	n := headerPrefetchSize.Load()
-	if size < n {
-		n = size
-	}
-
-	prefix := make([]byte, n)
-	if n > 0 {
-		read, err := parallelReadAt(ra, prefix, 0)
-		if err != nil && err != io.EOF {
-			return nil, err
-		}
-		prefix = prefix[:read]
+	if int64(len(prefix)) > size {
+		prefix = prefix[:size]
 	}
 
 	return &prefixReader{inner: ra, prefix: prefix, size: size}, nil
@@ -87,8 +134,15 @@ func (p *prefixReader) ReadAt(b []byte, off int64) (int, error) {
 	if off >= 0 && off+int64(len(b)) <= int64(len(p.prefix)) {
 		return copy(b, p.prefix[off:off+int64(len(b))]), nil
 	}
-	// A read outside the prefetched prefix means a network round-trip; counting
-	// these reveals whether the prefix is too small to cover the header/IFD.
+	for _, e := range p.extra {
+		if off >= e.off && off+int64(len(b)) <= e.off+int64(len(e.data)) {
+			start := off - e.off
+			return copy(b, e.data[start:start+int64(len(b))]), nil
+		}
+	}
+	// A read outside the prefetched prefix and every added extent means a
+	// network round-trip; counting these reveals whether the header/IFD
+	// prefetch (and its follow-up merged fetch) failed to cover the IFD.
 	atomic.AddInt64(&p.fallbacks, 1)
 	return p.inner.ReadAt(b, off)
 }

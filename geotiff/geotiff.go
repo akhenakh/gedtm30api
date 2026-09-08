@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -498,13 +499,32 @@ func readTags(r io.ReadSeeker) (Tags, head, error) {
 	if h.isBigTIFF {
 		entryLen = 20
 	}
+	numEntriesFieldSize := int64(2)
+	if h.isBigTIFF {
+		numEntriesFieldSize = 8
+	}
+	ifdBlockStart := int64(ifdOffset) + numEntriesFieldSize
 	ifdBlockSize := (entryLen * int(numEntries))
 	ifdBlock := make([]byte, ifdBlockSize)
 	if _, err := io.ReadFull(r, ifdBlock); err != nil {
 		return nil, h, fmt.Errorf("failed to read IFD block: %w", err)
 	}
+	// Cache the raw entries block too: for an LZW source, libtiff's own
+	// TIFFClientOpen parses this same directory from scratch when the first
+	// tile is decoded (see goRemoteRead in libtiff_export.go); without this,
+	// that re-parse would pay for the exact same out-of-prefix read Go just
+	// made, a second time.
+	if pr, ok := r.(*prefixReader); ok {
+		pr.addExtent(ifdBlockStart, ifdBlock)
+	}
 	ifdReader := bytes.NewReader(ifdBlock)
 
+	// Pass 1: parse every entry's header (tag/type/count/offset) without
+	// fetching any out-of-line value yet. This lets us discover every
+	// out-of-prefix range this IFD needs up front, so they can be
+	// batch-fetched together below instead of one blocking network read per
+	// tag (see prefetchMissingRanges).
+	entries := make([]iFDEntry, 0, numEntries)
 	for i := uint64(0); i < numEntries; i++ {
 		var entry iFDEntry
 		var tag, ftype uint16
@@ -542,15 +562,99 @@ func readTags(r io.ReadSeeker) (Tags, head, error) {
 			entry.ValueBytes = offsetBytes[:totalBytes]
 		}
 
-		tagvalue, err := entry.value(r, h.byteOrder)
+		entries = append(entries, entry)
+	}
+
+	// Pass 2: batch-fetch every range this IFD needs that falls outside the
+	// header prefix (e.g. TileOffsets/TileByteCounts on a large raster) in
+	// as few round trips as possible, and feed the results back into the
+	// prefixReader so both pass 3 below and (for LZW sources) libtiff's
+	// later directory read serve them from memory.
+	if pr, ok := r.(*prefixReader); ok {
+		prefetchMissingRanges(pr, entries)
+	}
+
+	// Pass 3: build each tag's typed value, now served from memory except in
+	// the rare case pass 2 didn't cover (visible as a non-zero Fallbacks()).
+	for i := range entries {
+		tagvalue, err := entries[i].value(r, h.byteOrder)
 		if err != nil {
 			return nil, h, err
 		}
-		tags[entry.Tag] = *tagvalue
+		tags[entries[i].Tag] = *tagvalue
 	}
 
 	// We explicitly DO NOT read the offset to the next IFD and loop.
 	return tags, h, nil
+}
+
+// prefetchMissingRanges finds every IFD entry whose value lies outside pr's
+// current prefix/extents and fetches the needed bytes in as few round trips
+// as possible, merging nearby ranges (e.g. TileOffsets and TileByteCounts,
+// which GDAL typically places adjacently) into a single read rather than
+// fetching each tag's range separately. Fetches for distinct groups run
+// concurrently; addExtent is only called afterwards, single-threaded, so
+// there is no concurrent mutation of pr's extent list.
+func prefetchMissingRanges(pr *prefixReader, entries []iFDEntry) {
+	// maxMergeSpan bounds how much extra, unneeded data a merge is allowed to
+	// pull in just to save a round trip.
+	const maxMergeSpan = 4 * 1024 * 1024
+
+	type byteRange struct{ start, end int64 }
+	var missing []byteRange
+	for i := range entries {
+		e := &entries[i]
+		if len(e.ValueBytes) > 0 {
+			continue
+		}
+		length := int64(e.FType.bytes()) * int64(e.Count)
+		if length <= 0 {
+			continue
+		}
+		start := int64(e.ValueOffset)
+		end := start + length
+		if pr.covers(start, end) {
+			continue
+		}
+		missing = append(missing, byteRange{start, end})
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	sort.Slice(missing, func(i, j int) bool { return missing[i].start < missing[j].start })
+
+	groups := missing[:1]
+	for _, m := range missing[1:] {
+		last := &groups[len(groups)-1]
+		if m.end-last.start <= maxMergeSpan {
+			if m.end > last.end {
+				last.end = m.end
+			}
+			continue
+		}
+		groups = append(groups, m)
+	}
+
+	results := make([][]byte, len(groups))
+	var wg sync.WaitGroup
+	for i, g := range groups {
+		wg.Add(1)
+		go func(i int, g byteRange) {
+			defer wg.Done()
+			buf := make([]byte, g.end-g.start)
+			n, err := parallelReadAt(pr.inner, buf, g.start)
+			if err != nil && err != io.EOF {
+				return
+			}
+			results[i] = buf[:n]
+		}(i, g)
+	}
+	wg.Wait()
+
+	for i, g := range groups {
+		pr.addExtent(g.start, results[i])
+	}
 }
 
 func (ifd *iFDEntry) value(r io.ReadSeeker, byteOrder binary.ByteOrder) (*tagData, error) {
@@ -890,7 +994,7 @@ func (g *GeoTIFF) fetchAndDecompressTile(tileNum int) ([]byte, error) {
 	if !ok {
 		return nil, errors.New("reader does not support ReadAt for tile fetching")
 	}
-	if _, err := readerAt.ReadAt(tileBytes, int64(offset)); err != nil {
+	if _, err := parallelReadAt(readerAt, tileBytes, int64(offset)); err != nil {
 		return nil, fmt.Errorf("failed to read tile %d from source: %w", tileNum, err)
 	}
 

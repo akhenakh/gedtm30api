@@ -441,6 +441,62 @@ func TestVRTProfile(t *testing.T) {
 	}
 }
 
+// TestHeaderPrefetchMergesMisses forces the header prefetch to be far smaller
+// than the IFD (so essentially every out-of-line tag, including
+// TileOffsets/TileByteCounts, falls outside it) and verifies two things: (1)
+// the file still opens and decodes correctly, and (2) readTags' merged fetch
+// (prefetchMissingRanges) covered everything it found in one pass, leaving
+// only the IFD directory block's own read as a fallback by the time Open
+// returns -- i.e. no leftover one-round-trip-per-tag waterfall. Tile fetches
+// (which happen afterwards, on AtCoord) are expected to add fallbacks of
+// their own; those are outside the header/IFD prefetch this test is about.
+func TestHeaderPrefetchMergesMisses(t *testing.T) {
+	const tinyPrefetch = 200 // bytes: far smaller than any real IFD
+	orig := headerPrefetchSize.Load()
+	SetHeaderPrefetchSize(tinyPrefetch)
+	t.Cleanup(func() { SetHeaderPrefetchSize(orig) })
+
+	f, err := os.Open("testdata/extend-cog.tiff")
+	if err != nil {
+		t.Fatalf("failed to open test file: %v", err)
+	}
+	defer f.Close()
+
+	geo, err := Open(f, 5, 1)
+	if err != nil {
+		t.Fatalf("failed to open GeoTIFF with a %d-byte header prefetch: %v", tinyPrefetch, err)
+	}
+
+	pr, ok := geo.reader.(*prefixReader)
+	if !ok {
+		t.Fatalf("expected geo.reader to be a *prefixReader, got %T", geo.reader)
+	}
+	if pr.PrefixLen() != tinyPrefetch {
+		t.Fatalf("expected a %d-byte prefix, got %d", tinyPrefetch, pr.PrefixLen())
+	}
+	// With a 200-byte prefix, this test COG's IFD directory entries and every
+	// out-of-line tag value (TileOffsets, TileByteCounts, GeoKeyDirectory,
+	// ModelPixelScale, ModelTiepoint, ...) all fall outside it -- pre-fix,
+	// each out-of-line tag value cost its own fallback (a network round trip
+	// on the real thing). Post-fix they're batch-fetched into one merged
+	// extent, so the only fallback left is the IFD directory block read
+	// itself (a separate, single read that happens before the tag values are
+	// even parsed, so it isn't something prefetchMissingRanges can cover).
+	// A handful of tags, individually missed, would push this well past 2.
+	if got := pr.Fallbacks(); got > 2 {
+		t.Errorf("expected readTags' merged fetch to leave at most ~2 fallbacks (the IFD block read, plus one merged tag-value fetch) after Open, got %d -- looks like tag values are being fetched one-by-one again", got)
+	}
+
+	// The file should still decode correctly despite the undersized prefix.
+	gotElevation, err := geo.AtCoord(6.86487244, 45.83291118)
+	if err != nil {
+		t.Fatalf("AtCoord returned an unexpected error: %v", err)
+	}
+	if !floatEquals(gotElevation, 4805.3) {
+		t.Errorf("AtCoord got elevation %f, want 4805.3", gotElevation)
+	}
+}
+
 func TestLZWCog(t *testing.T) {
 	f, err := os.Open("testdata/lzw-cog.tiff")
 	if err != nil {
@@ -513,6 +569,59 @@ func TestLZWCog(t *testing.T) {
 	if !floatEquals(float32(bounds.UpperLeft.Lon), -121.953148) ||
 		!floatEquals(float32(bounds.UpperLeft.Lat), 37.194630) {
 		t.Errorf("Bounds UL mismatch: got (%f, %f)", bounds.UpperLeft.Lon, bounds.UpperLeft.Lat)
+	}
+}
+
+// TestLZWSharesHeaderExtentsWithLibtiff verifies that when a source is opened
+// via a non-file reader (forcing the getLZWTileDataFromBytes / goRemoteRead
+// "remote" path rather than libtiff opening the path directly), libtiff's own
+// TIFFClientOpen directory parse -- which happens lazily on the first tile
+// decode -- reuses the same prefixReader extents Go's own readTags already
+// populated, instead of re-fetching the IFD it just read. Without this, an
+// undersized header prefetch pays for every out-of-prefix IFD range twice:
+// once for Go's tag parsing, once for libtiff's from-scratch reparse.
+func TestLZWSharesHeaderExtentsWithLibtiff(t *testing.T) {
+	const tinyPrefetch = 200
+	orig := headerPrefetchSize.Load()
+	SetHeaderPrefetchSize(tinyPrefetch)
+	t.Cleanup(func() { SetHeaderPrefetchSize(orig) })
+
+	data, err := os.ReadFile("testdata/lzw-cog.tiff")
+	if err != nil {
+		t.Fatalf("failed to read LZW test file: %v", err)
+	}
+
+	// bytes.Reader has no Name() method, so getFilePath returns "" for it and
+	// tile decoding goes through the remote/libtiff-directory-reparse path
+	// this test targets, rather than libtiff opening the file by path.
+	geo, err := Open(bytes.NewReader(data), 5, 1)
+	if err != nil {
+		t.Fatalf("failed to open LZW GeoTIFF with a %d-byte header prefetch: %v", tinyPrefetch, err)
+	}
+
+	pr, ok := geo.reader.(*prefixReader)
+	if !ok {
+		t.Fatalf("expected geo.reader to be a *prefixReader, got %T", geo.reader)
+	}
+	afterOpen := pr.Fallbacks()
+
+	val, err := geo.AtCoord(-121.929444, 37.170926)
+	if err != nil {
+		t.Fatalf("AtCoord returned an unexpected error: %v", err)
+	}
+	if diff := val - 845.2; diff < -0.5 || diff > 0.5 {
+		t.Errorf("AtCoord got %f, want 845.2 (±0.5)", val)
+	}
+
+	// The only fallbacks a tile decode should add are libtiff's tiny
+	// next-IFD-offset read (a few bytes Go intentionally never reads -- see
+	// "We explicitly DO NOT read the offset to the next IFD" in readTags) and
+	// the tile's actual compressed data (necessarily uncached, that's the
+	// point of the read). If libtiff were re-fetching the IFD directory
+	// itself instead of reusing Go's extent, this would jump by several more
+	// fallbacks (one per out-of-line tag in the directory).
+	if got := pr.Fallbacks() - afterOpen; got > 2 {
+		t.Errorf("expected at most 2 new fallbacks from the first tile decode (next-IFD pointer + tile data), got %d -- libtiff looks like it's re-fetching the IFD directory Go already read", got)
 	}
 }
 

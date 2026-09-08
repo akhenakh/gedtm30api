@@ -1,4 +1,4 @@
-FROM golang:1.26.3 AS builder
+FROM golang:1.27.1 AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libtiff-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY go.mod go.sum ./

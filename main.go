@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -87,6 +88,12 @@ type Config struct {
 	// download one tile/header. Higher values aggregate more throughput over
 	// high-latency links (WAN/object storage). 1 disables parallelism.
 	TileFetchConcurrency int `env:"TILE_FETCH_CONCURRENCY" envDefault:"4"`
+	// TileFetchChunkSize is the read size above which a single tile/header
+	// fetch is split into TileFetchConcurrency concurrent range requests.
+	// Reads at or below this size are issued as one request: within a single
+	// AWS region, per-request latency (TTFB) dominates over per-connection
+	// throughput for typical COG tile sizes, so splitting them is a net loss.
+	TileFetchChunkSize int64 `env:"TILE_FETCH_CHUNK_SIZE" envDefault:"2097152"`
 	// HeaderPrefetchSize is how many header bytes are fetched in one read when a
 	// source is opened. Must cover the IFD; raise it if open logs show
 	// prefix_misses > 0.
@@ -110,8 +117,10 @@ func main() {
 	slog.SetDefault(logger)
 
 	logger.Debug("config:", "config", cfg)
+	logger.Info("runtime", "GOMAXPROCS", runtime.GOMAXPROCS(0))
 
 	geotiff.SetTileFetchConcurrency(cfg.TileFetchConcurrency)
+	geotiff.SetTileFetchChunkSize(cfg.TileFetchChunkSize)
 	geotiff.SetHeaderPrefetchSize(cfg.HeaderPrefetchSize)
 
 	ctx, cancel := context.WithCancel(context.Background())
