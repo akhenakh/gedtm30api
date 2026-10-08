@@ -709,3 +709,71 @@ func TestLZWRemote(t *testing.T) {
 		t.Errorf("unexpected elevation range: %.1f to %.1f", minVal, maxVal)
 	}
 }
+
+// TestPredictor2Float32 guards against a regression where the horizontal
+// differencing predictor (Predictor=2) was not undone for Float32 tiles: the
+// DEFLATE path only handled PredictorFloatingPoint (3), so Predictor=2 Float32
+// COGs (e.g. GEDTM30 v1.2) were returned as raw differenced words — denormal
+// or NaN floats. Reference values come from GDAL/gdallocationinfo.
+func TestPredictor2Float32(t *testing.T) {
+	f, err := os.Open("testdata/predictor2-float-cog.tiff")
+	if err != nil {
+		t.Fatalf("failed to open test file: %v", err)
+	}
+	defer f.Close()
+
+	geo, err := Open(f, 5, 1)
+	if err != nil {
+		t.Fatalf("failed to open GeoTIFF: %v", err)
+	}
+	if geo.compression != DEFLATE || geo.sampleFormat != SampleFormatFloat || geo.predictor != PredictorHorizontal {
+		t.Fatalf("unexpected test file format: compression=%d sampleFormat=%d predictor=%d",
+			geo.compression, geo.sampleFormat, geo.predictor)
+	}
+
+	// Pixel-space reference values (col, row) -> elevation, from GDAL.
+	cases := []struct {
+		col, row int
+		want     float32
+	}{
+		{0, 0, 765.4},
+		{128, 128, 1657.6},
+		{255, 255, 2794.1},
+		{10, 200, 2646.4},
+		{200, 10, 731.0},
+	}
+
+	// 1. Directly assert the decoded tile, independent of coordinate math.
+	data, err := geo.getTileData(0)
+	if err != nil {
+		t.Fatalf("getTileData(0) failed: %v", err)
+	}
+	tile, ok := data.([]float32)
+	if !ok {
+		t.Fatalf("unexpected tile type %T", data)
+	}
+	for _, c := range cases {
+		idx := c.row*int(geo.tileWidth) + c.col
+		if !floatEquals(tile[idx], c.want) {
+			t.Errorf("tile pixel (%d,%d): got %v, want %v", c.col, c.row, tile[idx], c.want)
+		}
+	}
+
+	// 2. Assert the full AtCoord path resolves to the same value.
+	rect, err := geo.Bounds()
+	if err != nil {
+		t.Fatalf("Bounds() failed: %v", err)
+	}
+	for _, c := range cases {
+		lon := rect.UpperLeft.Lon + float64(c.col)*geo.PixelScaleX
+		lat := rect.UpperLeft.Lat - float64(c.row)*math.Abs(geo.PixelScaleY)
+		got, err := geo.AtCoord(lon, lat)
+		if err != nil {
+			t.Errorf("AtCoord(%f,%f) failed: %v", lon, lat, err)
+			continue
+		}
+		if !floatEquals(got, c.want) {
+			t.Errorf("AtCoord(%f,%f): got %v, want %v", lon, lat, got, c.want)
+		}
+	}
+}

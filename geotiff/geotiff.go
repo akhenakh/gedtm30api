@@ -810,7 +810,13 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 				return nil, fmt.Errorf("unsupported bit depth for float: %d", g.bitsPerSample)
 			}
 			tileData := decodeFloat32(decompressedBytes, g.byteOrder)
-			if g.predictor == PredictorFloatingPoint {
+			switch g.predictor {
+			case PredictorHorizontal:
+				// Predictor=2 differences the raw 32-bit sample words, so undo
+				// it on the words (two's complement) and read them back as
+				// float32. This is what GDAL/libtiff do for Float32 tiles.
+				undoHorizontalPredictionForInt32(float32Words(tileData), g.tileWidth, g.tileLength)
+			case PredictorFloatingPoint:
 				undoHorizontalPredictionForFloat32(tileData, g.tileWidth, g.tileLength)
 			}
 			processedData = tileData
@@ -971,6 +977,18 @@ func decodeInt32(raw []byte, bo binary.ByteOrder) []int32 {
 		out[i] = int32(bo.Uint32(raw[i*4:]))
 	}
 	return out
+}
+
+// float32Words reinterprets a float32 slice as its underlying 32-bit words,
+// sharing the same backing array (so in-place changes are visible through
+// data). The horizontal differencing predictor (Predictor=2) is defined over
+// the sample words, not their numeric float value, so it must be undone on the
+// words for Float32 tiles.
+func float32Words(data []float32) []int32 {
+	if len(data) == 0 {
+		return nil
+	}
+	return unsafe.Slice((*int32)(unsafe.Pointer(&data[0])), len(data))
 }
 
 func (g *GeoTIFF) processDecompressedTile(tileNum int, raw []byte) (any, error) {
