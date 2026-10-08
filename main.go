@@ -355,7 +355,7 @@ func getElevationHandler(geo geotiff.GeoRaster) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("Could not retrieve elevation: %v", err), status)
 			return
 		}
-		response := map[string]interface{}{"latitude": lat, "longitude": lng, "elevation": value}
+		response := map[string]any{"latitude": lat, "longitude": lng, "elevation": value}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	}

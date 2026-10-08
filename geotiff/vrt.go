@@ -23,17 +23,17 @@ import (
 const defaultMaxOpenSources = 256
 
 type vrtXML struct {
-	RasterXSize  float64 `xml:"rasterXSize,attr"`
-	RasterYSize  float64 `xml:"rasterYSize,attr"`
-	GeoTransform string  `xml:"GeoTransform"`
+	RasterXSize  float64      `xml:"rasterXSize,attr"`
+	RasterYSize  float64      `xml:"rasterYSize,attr"`
+	GeoTransform string       `xml:"GeoTransform"`
 	Bands        []vrtBandXML `xml:"VRTRasterBand"`
 }
 
 type vrtBandXML struct {
-	DataType       string               `xml:"dataType,attr"`
-	Band           int                  `xml:"band,attr"`
-	SimpleSources  []vrtSourceXML       `xml:"SimpleSource"`
-	ComplexSources []vrtSourceXML       `xml:"ComplexSource"`
+	DataType       string         `xml:"dataType,attr"`
+	Band           int            `xml:"band,attr"`
+	SimpleSources  []vrtSourceXML `xml:"SimpleSource"`
+	ComplexSources []vrtSourceXML `xml:"ComplexSource"`
 }
 
 type vrtSourceXML struct {
@@ -56,9 +56,9 @@ type vrtRectXML struct {
 }
 
 type VRTSourceInfo struct {
-	Filename  string
-	Relative  bool // relativeToVRT attribute
-	SourceBand int
+	Filename                             string
+	Relative                             bool // relativeToVRT attribute
+	SourceBand                           int
 	SrcXOff, SrcYOff, SrcXSize, SrcYSize int
 	DstXOff, DstYOff, DstXSize, DstYSize int
 }
@@ -351,7 +351,7 @@ func (v *VRTGeo) getSourceGeo(filename string) (*GeoTIFF, error) {
 	}
 	v.mu.Unlock()
 
-	vgeo, err, _ := v.inflight.Do(filename, func() (interface{}, error) {
+	vgeo, err, _ := v.inflight.Do(filename, func() (any, error) {
 		v.mu.Lock()
 		if geo, ok := v.lruGet(filename); ok {
 			v.mu.Unlock()
@@ -430,7 +430,7 @@ func (v *VRTGeo) Profile(coordinates [][]float64) ([][]float64, error) {
 			continue
 		}
 
-			slog.Debug("VRT profile segment", "seg", i, "startLat", startLat, "startLon", startLon, "endLat", endLat, "endLon", endLon, "startPx", x1, "startPy", y1, "endPx", x2, "endPy", y2)
+		slog.Debug("VRT profile segment", "seg", i, "startLat", startLat, "startLon", startLon, "endLat", endLat, "endLon", endLon, "startPx", x1, "startPy", y1, "endPx", x2, "endPy", y2)
 
 		dx := float64(x2 - x1)
 		dy := float64(y2 - y1)

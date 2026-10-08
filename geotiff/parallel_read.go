@@ -57,10 +57,7 @@ func parallelReadAt(ra io.ReaderAt, buf []byte, off int64) (int, error) {
 	var firstErr error
 
 	for start := 0; start < n; start += chunkSize {
-		end := start + chunkSize
-		if end > n {
-			end = n
-		}
+		end := min(start+chunkSize, n)
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(s, e int) {

@@ -740,7 +740,7 @@ func (g *GeoTIFF) loc(x, y int) (float32, error) {
 	// I/O per query, so it is gated behind prefetchEnabled.
 	if g.prefetchEnabled {
 		prefetchKey := fmt.Sprintf("prefetch-%d", tileNum)
-		go g.inflightPrefetch.Do(prefetchKey, func() (interface{}, error) {
+		go g.inflightPrefetch.Do(prefetchKey, func() (any, error) {
 			g.prefetchNeighbors(tileNum)
 			// We add a short "Forget" duration. This allows another
 			// prefetch to be triggered for the same tile after a while,
@@ -788,7 +788,7 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 		return item.Value(), nil
 	}
 
-	v, err, _ := g.inflightData.Do(key, func() (interface{}, error) {
+	v, err, _ := g.inflightData.Do(key, func() (any, error) {
 		if g.compression == LZW {
 			data, lerr := g.getLZWTileData(tileNum)
 			if lerr != nil {
@@ -967,7 +967,7 @@ func (g *GeoTIFF) finalizeRemote() {
 func decodeFloat32(raw []byte, bo binary.ByteOrder) []float32 {
 	n := len(raw) / 4
 	out := make([]float32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i] = math.Float32frombits(bo.Uint32(raw[i*4:]))
 	}
 	return out
@@ -977,7 +977,7 @@ func decodeFloat32(raw []byte, bo binary.ByteOrder) []float32 {
 func decodeInt32(raw []byte, bo binary.ByteOrder) []int32 {
 	n := len(raw) / 4
 	out := make([]int32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i] = int32(bo.Uint32(raw[i*4:]))
 	}
 	return out
@@ -1033,10 +1033,7 @@ func (g *GeoTIFF) fetchAndDecompressTile(tileNum int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read tile %d from source: %w", tileNum, err)
 	}
 
-	n := 20
-	if len(tileBytes) < n {
-		n = len(tileBytes)
-	}
+	n := min(len(tileBytes), 20)
 	slog.Debug("raw tile data", "file", g.Name, "tile", tileNum, "offset", offset, "byteCount", byteCount, "firstBytes", tileBytes[:n])
 
 	var decompressedBytes []byte
@@ -1193,7 +1190,7 @@ func undoHorizontalPredictionForFloat32(data []float32, tileWidth, tileHeight ui
 		firstOff := rowStart
 		for x := 1; x < int(tileWidth); x++ {
 			sampleOff := rowStart + x*bytesPerSample
-			for b := 0; b < bytesPerSample; b++ {
+			for b := range bytesPerSample {
 				raw[sampleOff+b] += raw[firstOff+b]
 			}
 		}

@@ -521,31 +521,31 @@ func TestLZWCog(t *testing.T) {
 
 	// Test known elevation values from GDAL reference
 	tests := []struct {
-		name     string
-		lon      float64
-		lat      float64
-		expected float32
+		name      string
+		lon       float64
+		lat       float64
+		expected  float32
 		tolerance float32
 	}{
 		{
-			name:     "top-left corner (slightly inset)",
-			lon:      -121.953148 + 0.000010,
-			lat:      37.194630 - 0.000010,
-			expected: 474.2,
+			name:      "top-left corner (slightly inset)",
+			lon:       -121.953148 + 0.000010,
+			lat:       37.194630 - 0.000010,
+			expected:  474.2,
 			tolerance: 0.5,
 		},
 		{
-			name:     "center pixel",
-			lon:      -121.929444,
-			lat:      37.170926,
-			expected: 845.2,
+			name:      "center pixel",
+			lon:       -121.929444,
+			lat:       37.170926,
+			expected:  845.2,
 			tolerance: 0.5,
 		},
 		{
-			name:     "known pixel (462,173)",
-			lon:      -121.910370,
-			lat:      37.178611,
-			expected: 915.9,
+			name:      "known pixel (462,173)",
+			lon:       -121.910370,
+			lat:       37.178611,
+			expected:  915.9,
 			tolerance: 0.5,
 		},
 	}
@@ -684,8 +684,8 @@ func TestLZWRemote(t *testing.T) {
 
 	// Compare with GDAL reference values
 	tests := []struct {
-		pixelIdx int
-		expected float32
+		pixelIdx  int
+		expected  float32
 		tolerance float32
 	}{
 		{0, 474.2, 0.5},
@@ -696,7 +696,9 @@ func TestLZWRemote(t *testing.T) {
 	for _, tc := range tests {
 		got := floats[tc.pixelIdx]
 		diff := got - tc.expected
-		if diff < 0 { diff = -diff }
+		if diff < 0 {
+			diff = -diff
+		}
 		if diff > tc.tolerance {
 			t.Errorf("pixel %d: got %f, want %f (±%f)", tc.pixelIdx, got, tc.expected, tc.tolerance)
 		}
@@ -705,8 +707,12 @@ func TestLZWRemote(t *testing.T) {
 	// Verify bounds by computing min/max
 	var minVal, maxVal float32 = floats[0], floats[0]
 	for _, v := range floats {
-		if v < minVal { minVal = v }
-		if v > maxVal { maxVal = v }
+		if v < minVal {
+			minVal = v
+		}
+		if v > maxVal {
+			maxVal = v
+		}
 	}
 	t.Logf("Tile range: min=%.1f max=%.1f", minVal, maxVal)
 	if minVal < 200 || maxVal > 1200 {
@@ -789,7 +795,7 @@ func TestPredictor2Float32(t *testing.T) {
 func TestCacheByteBudget(t *testing.T) {
 	const tileBytes = 1 << 20 // 1 MiB tiles for the test
 	c := ccache.New(ccache.Configure[any]().MaxSize(4 * tileBytes).PercentToPrune(10))
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		c.Set(strconv.Itoa(i), tileFloats(make([]float32, tileBytes/4)), time.Minute)
 		time.Sleep(time.Millisecond)
 	}
