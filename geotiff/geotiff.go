@@ -106,9 +106,10 @@ type GeoTIFF struct {
 
 	// tileCache is an in-memory LRU cache that stores *processed* tile data.
 	// Instead of caching raw bytes, it caches the final, ready-to-use data slices
-	// (e.g., []float32), which dramatically reduces CPU load and garbage collection
-	// pressure on cache hits. The value type is `any` to accommodate different
-	// sample formats (e.g. []float32, []int32).
+	// (tileFloats/tileInts), which dramatically reduces CPU load and garbage
+	// collection pressure on cache hits. The value type is `any` to accommodate
+	// different sample formats. Both value types implement ccache's Sized so the
+	// cache budget is accounted in bytes, not item count.
 	tileCache *ccache.Cache[any]
 
 	// cacheKeyPrefix namespaces this file's tile keys within tileCache. It is
@@ -209,16 +210,19 @@ func (t Tag) String() string {
 
 // Open parses a GeoTIFF file from the provided io.ReadSeeker and returns a GeoTIFF struct
 // with all necessary metadata extracted for reading geographic raster data.
-func Open(r io.ReadSeeker, cacheSize int64, itemsToPrune uint32) (*GeoTIFF, error) {
-	cache := ccache.New(ccache.Configure[any]().MaxSize(cacheSize).ItemsToPrune(itemsToPrune))
+// cacheSize is the tile-cache budget in bytes; prunePercent (0-100) is the
+// fraction of the budget evicted once it is exceeded. The budget is in bytes
+// rather than tiles so it does not depend on the source's tile dimensions: a
+// 2048x2048 Float32 tile is 16 MiB.
+func Open(r io.ReadSeeker, cacheSize int64, prunePercent uint8) (*GeoTIFF, error) {
+	cache := ccache.New(ccache.Configure[any]().MaxSize(cacheSize).PercentToPrune(prunePercent))
 	return OpenWithCache(r, cache, "")
 }
 
 // OpenWithCache is like Open but uses a caller-provided tile cache. keyPrefix
 // namespaces this file's tiles within that (possibly shared) cache so multiple
 // GeoTIFFs can share a single cache without key collisions. A VRT uses this to
-// bound the total number of cached tiles across all of its source files with
-// one budget, keeping the same "MaxSize counts tiles" semantics as a single COG.
+// bound the total cached bytes across all of its source files with one budget.
 func OpenWithCache(r io.ReadSeeker, cache *ccache.Cache[any], keyPrefix string) (*GeoTIFF, error) {
 	// Fetch the header region once so the tag parser (and later libtiff's
 	// remote open) read it from memory instead of issuing a network round-trip
@@ -723,8 +727,8 @@ func (g *GeoTIFF) loc(x, y int) (float32, error) {
 	tileY := y / int(g.tileLength) // Tile row index
 	tileNum := g.tilesAcross*tileY + tileX
 
-	// Get the *processed* tile data. This will be a typed slice (e.g., []float32).
-	// This is a blocking call for the primary tile.
+	// Get the *processed* tile data (tileFloats or tileInts). This is a blocking
+	// call for the primary tile.
 	processedTile, err := g.getTileData(tileNum)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get data for tile %d: %w", tileNum, err)
@@ -756,13 +760,13 @@ func (g *GeoTIFF) loc(x, y int) (float32, error) {
 	// Type-assert the cached data and extract the value directly.
 	// This is extremely fast as the expensive processing is already done.
 	switch data := processedTile.(type) {
-	case []float32:
+	case tileFloats:
 		if pixelIndexInTile >= len(data) {
 			return 0, fmt.Errorf("pixel index %d out of tile bounds (%d)", pixelIndexInTile, len(data))
 		}
 		return data[pixelIndexInTile], nil
 
-	case []int32:
+	case tileInts:
 		if pixelIndexInTile >= len(data) {
 			return 0, fmt.Errorf("pixel index %d out of tile bounds (%d)", pixelIndexInTile, len(data))
 		}
@@ -819,7 +823,7 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 			case PredictorFloatingPoint:
 				undoHorizontalPredictionForFloat32(tileData, g.tileWidth, g.tileLength)
 			}
-			processedData = tileData
+			processedData = tileFloats(tileData)
 		case SampleFormatInt:
 			if g.bitsPerSample != 32 {
 				return nil, fmt.Errorf("unsupported bit depth for int: %d", g.bitsPerSample)
@@ -828,7 +832,7 @@ func (g *GeoTIFF) getTileData(tileNum int) (any, error) {
 			if g.predictor == PredictorHorizontal {
 				undoHorizontalPredictionForInt32(tileData, g.tileWidth, g.tileLength)
 			}
-			processedData = tileData
+			processedData = tileInts(tileData)
 		default:
 			processingErr = fmt.Errorf("unsupported sample format (SampleFormat: %d, BitsPerSample: %d)", g.sampleFormat, g.bitsPerSample)
 		}
@@ -991,8 +995,21 @@ func float32Words(data []float32) []int32 {
 	return unsafe.Slice((*int32)(unsafe.Pointer(&data[0])), len(data))
 }
 
+// tileFloats and tileInts are the values stored in tileCache. They implement
+// ccache's Sized so the cache accounts for real bytes: a decoded 2048x2048
+// Float32 tile is 16 MiB, and ccache's default per-item size of 1 would let a
+// tile-count budget balloon to tens of GiB (and the released pages are not
+// returned to the OS, so RSS stays high).
+type tileFloats []float32
+
+func (t tileFloats) Size() int64 { return int64(len(t)) * 4 }
+
+type tileInts []int32
+
+func (t tileInts) Size() int64 { return int64(len(t)) * 4 }
+
 func (g *GeoTIFF) processDecompressedTile(tileNum int, raw []byte) (any, error) {
-	tileData := decodeFloat32(raw, g.byteOrder)
+	tileData := tileFloats(decodeFloat32(raw, g.byteOrder))
 	g.tileCache.Set(g.cacheKeyPrefix+strconv.Itoa(tileNum), tileData, 10*time.Minute)
 	return tileData, nil
 }

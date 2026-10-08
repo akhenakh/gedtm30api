@@ -92,10 +92,10 @@ gedtm30api
   Example GCS: BUCKET_URI="gs://my-bucket", OBJECT_KEY="image.tif"
   Example Azure: BUCKET_URI="azblob://bucket" OBJECT_KEY="image.tif"
   Example File: BUCKET_URI="file:///path/to/dir", OBJECT_KEY="image.tif"
-- COG_SOURCE envDefault:"https://s3.opengeohub.org/global/edtm/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v20250611.tif"`
+- COG_SOURCE envDefault:"https://s3.opengeohub.org/global/dtm/v1.2/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif"
   Use it for HTTP access. Can point to a `.tiff` or `.vrt` file.
-- CACHE_MAX_SIZE envDefault:"1024" number of decoded tiles to keep in the cache. For a VRT this is the total budget shared across all source files.
-- CACHE_ITEMS_TO_PRUNE envDefault:"100" number of tiles to prune from the cache
+- CACHE_MAX_SIZE envDefault:"1073741824" (1 GiB) decoded-tile cache budget in **bytes**. For a VRT this is the total budget shared across all source files. Sizing by bytes (not tile count) keeps the cap meaningful across sources with different tile sizes: a decoded tile is `tileWidth × tileHeight × 4` bytes, e.g. **16 MiB** for the GEDTM30 2048×2048 Float32 COG.
+- CACHE_PRUNE_PERCENT envDefault:"10" percentage of the cache (by size) evicted in one pass once the byte budget is exceeded.
 - CACHE_MAX_OPEN_SOURCES envDefault:"256" (VRT only) maximum number of source GeoTIFF handles kept open at once. Tile memory is bounded by `CACHE_MAX_SIZE`; this caps per-source metadata and libtiff handles/file descriptors. Ignored for a single COG.
 - PREFETCH_NEIGHBORS envDefault:"false" when true, each query fetches the 8 tiles surrounding the requested tile in the background. This lowers latency for spatially coherent workloads (e.g. elevation profiles) but multiplies I/O per request, so leave it off for sparse single-point lookups.
 - TILE_FETCH_CONCURRENCY envDefault:"4" number of concurrent HTTP range requests used to split up a single read once it exceeds `TILE_FETCH_CHUNK_SIZE`. A single TCP stream to object storage rarely saturates a high-latency link, so splitting a large fetch into several parallel ranges can aggregate throughput. Set to 1 to disable. Tiles are fetched whole because LZW cannot be partially decoded. Note: this only helps when per-connection throughput (not total link bandwidth) is the bottleneck; on a saturated WAN link it has no effect.
@@ -247,22 +247,19 @@ A simple web UI is available at `http://localhost:8080`. It allows you to intera
 
 ## Cache Management
 
-The server uses a cache to store recently accessed *decoded* tiles. The cache size can be configured using the `CACHE_MAX_SIZE` environment variable, which counts **tiles**, not bytes. When the cache reaches its maximum size, the least recently used tiles are pruned to make room for new ones. The number of tiles pruned per eviction is set by `CACHE_ITEMS_TO_PRUNE`.
+The server uses a cache to store recently accessed *decoded* tiles. `CACHE_MAX_SIZE` is the cache budget in **bytes** (default 1 GiB). When the budget is exceeded, the least recently used tiles are evicted down to `CACHE_MAX_SIZE × (1 − CACHE_PRUNE_PERCENT/100)`. Sizing by bytes rather than by tile count keeps the cap meaningful across sources with different tile geometry: a decoded tile costs `tileWidth × tileHeight × 4` bytes regardless of what is stored on disk — **16 MiB** for the GEDTM30 2048×2048 Float32 COG, 1 MiB for a 512×512 tile.
 
-`CACHE_MAX_SIZE` is the total budget in both modes: a single COG holds up to that many of its own tiles, and a VRT shares one cache across all of its source files so the same limit bounds the whole mosaic.
+`CACHE_MAX_SIZE` is the total budget in both modes: a single COG's tiles share it, and a VRT shares one cache across all of its source files so the same byte limit bounds the whole mosaic.
 
 ### Sizing memory
 
-With 512 × 512 tiles, a pixel uses 4 bytes (float32 or int32), so one tile is 262,144 pixels × 4 = 1,048,576 bytes (1 MiB).
+Memory is roughly `CACHE_MAX_SIZE` for the decoded tiles plus Go runtime overhead. With the default 1 GiB budget, expect on the order of 1 GiB of cached tiles.
 
-So the tile cache uses roughly `CACHE_MAX_SIZE × tile size`:
-
-- 128 tiles ≈ 128 MiB
-- 1024 tiles (default) ≈ 1 GiB
+Mind the Go GC: with the default `GOGC=100` the heap is allowed to grow to about **twice** the live set before a collection, and the runtime does not promptly return freed pages to the OS, so RSS can plateau near `2 × CACHE_MAX_SIZE`. Set `GOMEMLIMIT` (for example to your container limit) to bound this, or lower `CACHE_MAX_SIZE`.
 
 For a VRT, add a small bounded overhead for open source handles: `CACHE_MAX_OPEN_SOURCES` × (per-file metadata + one libtiff handle/FD), on the order of tens of MiB at the default of 256. Evicted source handles are released by the Go garbage collector once no in-flight read still references them.
 
-When setting a container/Kubernetes memory limit, budget `CACHE_MAX_SIZE × tile size` plus a few hundred MiB of headroom for the Go runtime and heap fragmentation (e.g. request ~1.25 GiB / limit ~2 GiB with the defaults). Note the per-tile TTL means the resident set is a ceiling, not a constant.
+When setting a container/Kubernetes memory limit, budget ~`2 × CACHE_MAX_SIZE` (or set `GOMEMLIMIT`) plus a few hundred MiB for the Go runtime and heap fragmentation. Note the per-tile TTL means the resident set is a ceiling, not a constant.
 
 ### Sizing CPU
 

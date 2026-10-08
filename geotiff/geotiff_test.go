@@ -10,8 +10,12 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/karlseguin/ccache/v3"
 )
 
 // floatEquals compares two float32 values with a small tolerance (epsilon).
@@ -30,7 +34,7 @@ func TestAtCoord(t *testing.T) {
 	defer f.Close()
 
 	// Initialize the GeoTIFF reader with our test file.
-	geo, err := Open(f, 5, 1)
+	geo, err := Open(f, 8<<20, 10)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}
@@ -120,7 +124,7 @@ func TestBounds(t *testing.T) {
 	}
 	defer f.Close()
 
-	geo, err := Open(f, 5, 1)
+	geo, err := Open(f, 8<<20, 10)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}
@@ -162,7 +166,7 @@ func TestProfile(t *testing.T) {
 	defer f.Close()
 
 	// Initialize the GeoTIFF reader with our test file.
-	geo, err := Open(f, 5, 1)
+	geo, err := Open(f, 8<<20, 10)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}
@@ -226,7 +230,7 @@ func TestCacheCompression(t *testing.T) {
 	defer f.Close()
 
 	// Initialize the GeoTIFF reader with a reasonable cache size.
-	geo, err := Open(f, 1024*1024*100, 100) // 100MB cache
+	geo, err := Open(f, 100<<20, 10) // 100 MiB cache
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}
@@ -319,7 +323,7 @@ func openTestVRT(t *testing.T) GeoRaster {
 		return os.Open("testdata/" + filename)
 	}
 
-	geo, err := OpenVRT(f, factory, 5, 1, 0)
+	geo, err := OpenVRT(f, factory, 8<<20, 10, 0)
 	if err != nil {
 		t.Fatalf("failed to open VRT: %v", err)
 	}
@@ -462,7 +466,7 @@ func TestHeaderPrefetchMergesMisses(t *testing.T) {
 	}
 	defer f.Close()
 
-	geo, err := Open(f, 5, 1)
+	geo, err := Open(f, 8<<20, 10)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF with a %d-byte header prefetch: %v", tinyPrefetch, err)
 	}
@@ -504,7 +508,7 @@ func TestLZWCog(t *testing.T) {
 	}
 	defer f.Close()
 
-	geo, err := Open(f, 5, 1)
+	geo, err := Open(f, 8<<20, 10)
 	if err != nil {
 		t.Fatalf("failed to open LZW GeoTIFF: %v", err)
 	}
@@ -594,7 +598,7 @@ func TestLZWSharesHeaderExtentsWithLibtiff(t *testing.T) {
 	// bytes.Reader has no Name() method, so getFilePath returns "" for it and
 	// tile decoding goes through the remote/libtiff-directory-reparse path
 	// this test targets, rather than libtiff opening the file by path.
-	geo, err := Open(bytes.NewReader(data), 5, 1)
+	geo, err := Open(bytes.NewReader(data), 8<<20, 10)
 	if err != nil {
 		t.Fatalf("failed to open LZW GeoTIFF with a %d-byte header prefetch: %v", tinyPrefetch, err)
 	}
@@ -722,7 +726,7 @@ func TestPredictor2Float32(t *testing.T) {
 	}
 	defer f.Close()
 
-	geo, err := Open(f, 5, 1)
+	geo, err := Open(f, 8<<20, 10)
 	if err != nil {
 		t.Fatalf("failed to open GeoTIFF: %v", err)
 	}
@@ -748,7 +752,7 @@ func TestPredictor2Float32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getTileData(0) failed: %v", err)
 	}
-	tile, ok := data.([]float32)
+	tile, ok := data.(tileFloats)
 	if !ok {
 		t.Fatalf("unexpected tile type %T", data)
 	}
@@ -775,5 +779,29 @@ func TestPredictor2Float32(t *testing.T) {
 		if !floatEquals(got, c.want) {
 			t.Errorf("AtCoord(%f,%f): got %v, want %v", lon, lat, got, c.want)
 		}
+	}
+}
+
+// TestCacheByteBudget guards the cache accounting: tile values must report
+// their real byte size to ccache (tileFloats/tileInts implement Sized), so a
+// byte budget is respected. If they regressed to plain []float32/[]int32,
+// ccache would count each tile as 1 and this many items would all fit.
+func TestCacheByteBudget(t *testing.T) {
+	const tileBytes = 1 << 20 // 1 MiB tiles for the test
+	c := ccache.New(ccache.Configure[any]().MaxSize(4 * tileBytes).PercentToPrune(10))
+	for i := 0; i < 40; i++ {
+		c.Set(strconv.Itoa(i), tileFloats(make([]float32, tileBytes/4)), time.Minute)
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if n := c.ItemCount(); n > 4 {
+		t.Errorf("cache holds %d tiles, want <= 4 (4 MiB budget / 1 MiB tiles); byte accounting not applied", n)
+	}
+	if s := tileFloats(make([]float32, 4)).Size(); s != 16 {
+		t.Errorf("tileFloats.Size() = %d, want 16", s)
+	}
+	if s := tileInts(make([]int32, 4)).Size(); s != 16 {
+		t.Errorf("tileInts.Size() = %d, want 16", s)
 	}
 }

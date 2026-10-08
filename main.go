@@ -75,8 +75,14 @@ type Config struct {
 	BucketURI string `env:"BUCKET_URI"`
 	ObjectKey string `env:"OBJECT_KEY"`
 
-	CacheMaxSize      int64  `env:"CACHE_MAX_SIZE" envDefault:"1024"`
-	CacheItemsToPrune uint32 `env:"CACHE_ITEMS_TO_PRUNE" envDefault:"100"`
+	// CacheMaxSize is the tile-cache budget in BYTES (default 1 GiB). It is a
+	// byte budget rather than a tile count so it stays correct across sources
+	// with different tile dimensions: a GEDTM30 2048x2048 Float32 tile is
+	// 16 MiB, so a 1024-tile budget would reserve ~16 GiB.
+	CacheMaxSize int64 `env:"CACHE_MAX_SIZE" envDefault:"1073741824"`
+	// CachePrunePercent is the fraction (0-100) of the cache evicted when the
+	// byte budget is exceeded.
+	CachePrunePercent uint8 `env:"CACHE_PRUNE_PERCENT" envDefault:"10"`
 	// CacheMaxOpenSources caps how many VRT source GeoTIFF handles stay open at
 	// once. Tile memory is bounded by CacheMaxSize; this bounds metadata and
 	// libtiff handles/FDs. Ignored for a single COG.
@@ -422,8 +428,8 @@ func setupTIFFReader(ctx context.Context, cfg Config, logger *slog.Logger) (geot
 		}
 	}
 
-	logger.Info("configuring tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune, "prefetch_neighbors", cfg.PrefetchNeighbors)
-	geo, err := geotiff.Open(reader, cfg.CacheMaxSize, cfg.CacheItemsToPrune)
+	logger.Info("configuring tile cache", "max_bytes", cfg.CacheMaxSize, "prune_percent", cfg.CachePrunePercent, "prefetch_neighbors", cfg.PrefetchNeighbors)
+	geo, err := geotiff.Open(reader, cfg.CacheMaxSize, cfg.CachePrunePercent)
 	if err != nil {
 		return nil, err
 	}
@@ -448,8 +454,8 @@ func setupBlobVRTReader(ctx context.Context, bucket *blob.Bucket, cfg Config, lo
 		return geotiff.NewBlobReader(innerCtx, bucket, filename)
 	}
 
-	logger.Info("configuring VRT tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
-	vrt, err := geotiff.OpenVRT(vrtReader, factory, cfg.CacheMaxSize, cfg.CacheItemsToPrune, cfg.CacheMaxOpenSources)
+	logger.Info("configuring VRT tile cache", "max_bytes", cfg.CacheMaxSize, "prune_percent", cfg.CachePrunePercent)
+	vrt, err := geotiff.OpenVRT(vrtReader, factory, cfg.CacheMaxSize, cfg.CachePrunePercent, cfg.CacheMaxOpenSources)
 	if err != nil {
 		return nil, err
 	}
@@ -468,8 +474,8 @@ func setupHTTPVRTReader(ctx context.Context, cfg Config, logger *slog.Logger) (g
 		return geotiff.NewHTTPRangeReader(filename, nil)
 	}
 
-	logger.Info("configuring VRT tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
-	vrt, err := geotiff.OpenVRT(r, factory, cfg.CacheMaxSize, cfg.CacheItemsToPrune, cfg.CacheMaxOpenSources)
+	logger.Info("configuring VRT tile cache", "max_bytes", cfg.CacheMaxSize, "prune_percent", cfg.CachePrunePercent)
+	vrt, err := geotiff.OpenVRT(r, factory, cfg.CacheMaxSize, cfg.CachePrunePercent, cfg.CacheMaxOpenSources)
 	if err != nil {
 		return nil, err
 	}
@@ -488,8 +494,8 @@ func setupLocalVRTReader(ctx context.Context, cfg Config, logger *slog.Logger) (
 		return os.Open(filename)
 	}
 
-	logger.Info("configuring VRT tile cache", "max_size", cfg.CacheMaxSize, "items_to_prune", cfg.CacheItemsToPrune)
-	vrt, err := geotiff.OpenVRT(f, factory, cfg.CacheMaxSize, cfg.CacheItemsToPrune, cfg.CacheMaxOpenSources)
+	logger.Info("configuring VRT tile cache", "max_bytes", cfg.CacheMaxSize, "prune_percent", cfg.CachePrunePercent)
+	vrt, err := geotiff.OpenVRT(f, factory, cfg.CacheMaxSize, cfg.CachePrunePercent, cfg.CacheMaxOpenSources)
 	if err != nil {
 		return nil, err
 	}

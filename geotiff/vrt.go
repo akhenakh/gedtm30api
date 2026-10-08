@@ -132,7 +132,7 @@ type sourceEntry struct {
 	geo      *GeoTIFF
 }
 
-func OpenVRT(r io.Reader, readerFactory ReaderFactory, cacheSize int64, itemsToPrune uint32, maxOpenSources int) (*VRTGeo, error) {
+func OpenVRT(r io.Reader, readerFactory ReaderFactory, cacheSize int64, prunePercent uint8, maxOpenSources int) (*VRTGeo, error) {
 	// Read the VRT through a large buffer: a VRT mosaic can reference thousands
 	// of sources (multi-MB XML), and the xml decoder otherwise reads in 4 KiB
 	// chunks — each a separate range request when the source is remote.
@@ -213,7 +213,7 @@ func OpenVRT(r io.Reader, readerFactory ReaderFactory, cacheSize int64, itemsToP
 		originY:       geoTransform[3],
 		sources:       sources,
 		readerFactory: readerFactory,
-		tileCache:     ccache.New(ccache.Configure[any]().MaxSize(cacheSize).ItemsToPrune(itemsToPrune)),
+		tileCache:     ccache.New(ccache.Configure[any]().MaxSize(cacheSize).PercentToPrune(prunePercent)),
 		sourceReaders: make(map[string]*list.Element),
 		sourceLRU:     list.New(),
 		maxSources:    maxOpenSources,
